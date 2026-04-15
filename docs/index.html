@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shorts Analyzer</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+<style>
+:root{
+  --bg:#0d1117;--surf:#161b22;--surf2:#21262d;--border:#30363d;
+  --text:#e6edf3;--dim:#8b949e;
+  --green:#3fb950;--red:#f85149;--blue:#58a6ff;--yellow:#e3b341;--purple:#bc8cff;
+  --accent:#238636;--accent-h:#2ea043;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+
+/* ── Header ── */
+.hdr{background:var(--surf);border-bottom:1px solid var(--border);padding:12px 24px;
+     display:flex;align-items:center;justify-content:space-between;
+     position:sticky;top:0;z-index:100;backdrop-filter:blur(8px)}
+.hdr-left{display:flex;align-items:center;gap:12px}
+.hdr-logo{font-size:22px}
+.hdr-title{font-size:17px;font-weight:700}
+.hdr-sub{font-size:13px;color:var(--dim);margin-left:4px}
+.hdr-badges{display:flex;gap:6px}
+
+.badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.yt {background:#ff000022;color:#ff6b6b;border:1px solid #ff000033}
+.tt {background:#00f2ea22;color:#00f2ea;border:1px solid #00f2ea33}
+.ig {background:#e1306c22;color:#e1306c;border:1px solid #e1306c33}
+
+/* ── Layout ── */
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
+
+.card{background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px}
+.card-title{font-size:12px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
+
+/* ── Tabs ── */
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:18px}
+.tab{padding:10px 20px;cursor:pointer;border-bottom:2px solid transparent;color:var(--dim);font-size:14px;font-weight:500;transition:.15s;user-select:none}
+.tab:hover{color:var(--text)}
+.tab.on{color:var(--blue);border-bottom-color:var(--blue)}
+.tab-pane{display:none}.tab-pane.on{display:block}
+
+/* ── Upload zone ── */
+.drop{border:2px dashed var(--border);border-radius:8px;padding:32px;text-align:center;
+      cursor:pointer;transition:.2s}
+.drop:hover,.drop.over{border-color:var(--blue);background:#58a6ff0a}
+.drop-icon{font-size:40px;margin-bottom:10px}
+.drop-text{color:var(--dim);font-size:14px;line-height:1.6}
+.drop-text strong{color:var(--text)}
+
+/* ── Inputs ── */
+textarea,input[type=text],input[type=number],input[type=url]{
+  background:var(--surf2);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);padding:9px 12px;font-size:13px;outline:none;width:100%;
+  transition:.15s}
+textarea{resize:vertical;font-family:monospace;height:180px;line-height:1.5}
+textarea:focus,input:focus{border-color:var(--blue);box-shadow:0 0 0 2px #58a6ff1a}
+input[type=number]{width:auto}
+
+/* ── Buttons ── */
+.btn{padding:9px 18px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;
+     border:1px solid transparent;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.btn-green{background:var(--accent);color:#fff;border-color:var(--accent-h)}
+.btn-green:hover{background:var(--accent-h)}
+.btn-green:disabled{opacity:.45;cursor:not-allowed}
+.btn-out{background:transparent;color:var(--text);border-color:var(--border)}
+.btn-out:hover{border-color:var(--dim)}
+.btn-red{background:#f8514912;color:var(--red);border-color:#f8514922}
+.btn-red:hover{background:#f8514922}
+.btn-sm{padding:5px 12px;font-size:12px}
+
+/* ── Progress ── */
+.prog-wrap{display:none}.prog-wrap.on{display:block}
+.prog-bar-bg{background:var(--surf2);border-radius:99px;height:8px;overflow:hidden;margin:12px 0}
+.prog-bar{height:100%;background:linear-gradient(90deg,#238636,#3fb950);border-radius:99px;
+          transition:width .35s ease;width:0}
+.prog-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.prog-stats{display:flex;gap:20px;flex-wrap:wrap}
+.stat{display:flex;align-items:center;gap:5px;font-size:13px}
+.stat-val{font-weight:700;font-variant-numeric:tabular-nums;min-width:2.5ch;text-align:right}
+.cur-url{font-size:11px;color:var(--dim);font-family:monospace;overflow:hidden;
+         text-overflow:ellipsis;white-space:nowrap;margin-top:6px;padding:4px 8px;
+         background:var(--surf2);border-radius:4px}
+
+/* ── Summary cards ── */
+.sum-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.sum-card{background:var(--surf2);border:1px solid var(--border);border-radius:8px;
+          padding:12px 16px;text-align:center}
+.sum-val{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums}
+.sum-lbl{font-size:11px;color:var(--dim);margin-top:2px}
+.c-green{color:var(--green)}.c-red{color:var(--red)}.c-blue{color:var(--blue)}.c-yellow{color:var(--yellow)}
+
+/* ── Table ── */
+.res-hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+.tbl-wrap{overflow:auto;border:1px solid var(--border);border-radius:8px;max-height:55vh}
+table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+th{background:var(--surf2);padding:9px 12px;text-align:left;font-weight:600;
+   color:var(--dim);position:sticky;top:0;border-bottom:1px solid var(--border);z-index:1}
+th.r{text-align:right}
+td{padding:7px 12px;border-bottom:1px solid #30363d33}
+td.r{text-align:right;font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#ffffff06}
+.tr-ok td{background:#3fb95008}
+.tr-err td{background:#f8514908}
+.url-td{max-width:220px;overflow:hidden;text-overflow:ellipsis;font-family:monospace;font-size:11px}
+.url-td a{color:var(--blue);text-decoration:none}
+.url-td a:hover{text-decoration:underline}
+.s-ok{background:#3fb95020;color:var(--green);padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600}
+.s-err{background:#f8514920;color:var(--red);padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600}
+.na{color:var(--border)}
+
+/* ── Settings overlay ── */
+.ov{display:none;position:fixed;inset:0;background:#000c;z-index:200;align-items:center;justify-content:center}
+.ov.on{display:flex}
+.ov-panel{background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:24px;
+          width:460px;max-width:94vw;box-shadow:0 16px 48px #0008}
+.ov-title{font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.fg{margin-bottom:14px}
+.fl{display:block;font-size:12px;font-weight:600;color:var(--dim);margin-bottom:5px}
+.fh{font-size:11px;color:var(--dim);margin-top:4px;line-height:1.5}
+.fh a{color:var(--blue)}
+
+/* ── Alert ── */
+.alert{padding:10px 14px;border-radius:6px;font-size:13px;margin-bottom:12px;display:flex;align-items:flex-start;gap:8px}
+.a-blue{background:#58a6ff18;border:1px solid #58a6ff33;color:var(--blue)}
+.a-warn{background:#e3b34118;border:1px solid #e3b34133;color:var(--yellow)}
+.a-green{background:#3fb95018;border:1px solid #3fb95033;color:var(--green)}
+
+/* ── Misc ── */
+.row{display:flex;align-items:center;gap:10px}
+.spacer{flex:1}
+.icon-btn{background:none;border:1px solid var(--border);border-radius:6px;
+          color:var(--dim);padding:6px 10px;cursor:pointer;font-size:14px;transition:.15s}
+.icon-btn:hover{border-color:var(--dim);color:var(--text)}
+.sep{height:1px;background:var(--border);margin:14px 0}
+.lbl-row{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap}
+.lbl-row span{font-size:12px;color:var(--dim)}
+
+/* ── Filter bar ── */
+.filter-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.filter-bar input{width:220px;font-size:12px;padding:6px 10px}
+.filter-bar select{background:var(--surf2);border:1px solid var(--border);border-radius:6px;
+                   color:var(--text);padding:6px 10px;font-size:12px;outline:none}
+
+@media(max-width:600px){
+  .hdr-badges,.hdr-sub{display:none}
+  .sum-val{font-size:20px}
+  .tbl-wrap{max-height:45vh}
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div class="hdr">
+  <div class="hdr-left">
+    <span class="hdr-logo">🎬</span>
+    <span class="hdr-title">Shorts Analyzer</span>
+    <span class="hdr-sub">engagement metrics</span>
+    <div class="hdr-badges">
+      <span class="badge yt">▶ YouTube</span>
+      <span class="badge tt">♪ TikTok</span>
+      <span class="badge ig">◈ Instagram</span>
+    </div>
+  </div>
+  <button class="icon-btn" onclick="showSettings()">⚙ 설정</button>
+</div>
+
+<!-- ── Settings overlay ── -->
+<div class="ov" id="ov" onclick="ovClick(event)">
+  <div class="ov-panel">
+    <div class="ov-title">⚙ 설정 <button class="icon-btn" onclick="closeSettings()">✕</button></div>
+
+    <div class="fg">
+      <label class="fl">백엔드 API URL <span style="color:var(--red)">*</span></label>
+      <div class="row">
+        <input type="url" id="cfgUrl" placeholder="https://shorts-analyzer-api.onrender.com" style="flex:1">
+        <button class="btn btn-out btn-sm" onclick="testBackend()">연결 테스트</button>
+      </div>
+      <div class="fh">
+        Render.com에 백엔드를 배포한 후 URL을 입력하세요.
+        <a href="https://github.com/hakkongch95-ui/shorts-analyzer#-backend-deploy" target="_blank">배포 가이드 →</a>
+      </div>
+    </div>
+
+    <div class="row" style="gap:20px;flex-wrap:wrap">
+      <div class="fg" style="flex:1;min-width:120px">
+        <label class="fl">요청 지연 (초)</label>
+        <input type="number" id="cfgDelay" value="0.3" min="0" max="10" step="0.1" style="width:90px">
+        <div class="fh">0 = 최대 속도</div>
+      </div>
+      <div class="fg" style="flex:1;min-width:120px">
+        <label class="fl">동시 처리 수</label>
+        <input type="number" id="cfgConcurrent" value="10" min="1" max="20" style="width:70px">
+        <div class="fh">최대 20</div>
+      </div>
+    </div>
+
+    <div id="testResult" style="display:none"></div>
+
+    <div class="sep"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-out" onclick="closeSettings()">취소</button>
+      <button class="btn btn-green" onclick="saveSettings()">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main ── -->
+<div class="wrap">
+
+  <!-- no-backend warning -->
+  <div class="alert a-warn" id="noBackendAlert" style="display:none">
+    ⚠ 백엔드 URL이 설정되지 않았습니다.
+    <a href="#" onclick="showSettings();return false" style="color:var(--yellow);font-weight:600">⚙ 설정</a>에서 Render.com 배포 URL을 입력하세요.
+    <a href="https://github.com/hakkongch95-ui/shorts-analyzer#-backend-deploy" target="_blank" style="color:var(--yellow)">배포 방법 →</a>
+  </div>
+
+  <!-- ── Input card ── -->
+  <div class="card">
+    <div class="tabs">
+      <div class="tab on" onclick="switchTab('excel',this)">📊 Excel 업로드</div>
+      <div class="tab" onclick="switchTab('text',this)">📝 URL 직접 입력</div>
+    </div>
+
+    <!-- Excel tab -->
+    <div class="tab-pane on" id="pane-excel">
+      <div class="drop" id="dropzone"
+           onclick="document.getElementById('fi').click()"
+           ondragover="dov(event)" ondragleave="dol(event)" ondrop="dod(event)">
+        <div class="drop-icon" id="dropIcon">📂</div>
+        <div class="drop-text" id="dropText">
+          <strong>Excel 파일을 드래그하거나 클릭하세요</strong><br>
+          .xlsx, .xls 지원 · URL이 300개 이상이어도 처리 가능
+        </div>
+      </div>
+      <input type="file" id="fi" accept=".xlsx,.xls" style="display:none" onchange="onFileSelect(event)">
+
+      <div id="excelInfo" style="display:none;margin-top:12px">
+        <div class="alert a-green" id="excelAlert"></div>
+        <div class="lbl-row">
+          <span>URL 열 번호:</span>
+          <input type="number" id="colNum" value="1" min="1" style="width:70px">
+          <span style="font-size:11px">1 = A열, 2 = B열 …</span>
+          <button class="btn btn-out btn-sm" onclick="previewExcel()">미리보기</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Text tab -->
+    <div class="tab-pane" id="pane-text">
+      <textarea id="urlBox"
+        placeholder="URL을 한 줄에 하나씩 입력 (300개 이상 가능):&#10;https://www.youtube.com/shorts/abc123&#10;https://www.tiktok.com/@user/video/123456789&#10;https://www.instagram.com/reel/xyz789/"></textarea>
+      <div class="lbl-row">
+        <span id="urlCnt">0개 URL</span>
+        <button class="btn btn-out btn-sm" onclick="document.getElementById('urlBox').value='';countUrls()">지우기</button>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+    <div class="row" style="flex-wrap:wrap;gap:8px">
+      <button class="btn btn-green" id="runBtn" onclick="run()" style="font-size:15px;padding:10px 28px">
+        🚀 분석 시작
+      </button>
+      <button class="btn btn-red" id="stopBtn" onclick="stop()" style="display:none">
+        ⏹ 중지
+      </button>
+      <span class="spacer"></span>
+      <span style="font-size:12px;color:var(--dim)" id="urlLabel"></span>
+    </div>
+  </div>
+
+  <!-- ── Progress card ── -->
+  <div class="card prog-wrap" id="progCard">
+    <div class="card-title">진행 현황</div>
+    <div class="prog-bar-bg"><div class="prog-bar" id="progBar"></div></div>
+    <div class="prog-row">
+      <span style="font-size:13px;color:var(--dim)" id="progTxt">0 / 0</span>
+      <span style="font-size:14px;font-weight:700" id="progPct">0%</span>
+    </div>
+    <div class="prog-stats" style="margin-top:10px">
+      <div class="stat"><span style="color:var(--green)">●</span><span style="color:var(--dim)">성공</span>
+        <span class="stat-val c-green" id="cOk">0</span></div>
+      <div class="stat"><span style="color:var(--red)">●</span><span style="color:var(--dim)">오류</span>
+        <span class="stat-val c-red" id="cErr">0</span></div>
+      <div class="stat"><span style="color:var(--yellow)">●</span><span style="color:var(--dim)">대기</span>
+        <span class="stat-val c-yellow" id="cPend">0</span></div>
+      <div class="stat"><span style="color:var(--blue)">●</span><span style="color:var(--dim)">총 조회수</span>
+        <span class="stat-val c-blue" id="cViews">0</span></div>
+    </div>
+    <div class="cur-url" id="curUrl">준비 중...</div>
+  </div>
+
+  <!-- ── Results card ── -->
+  <div class="card" id="resCard" style="display:none">
+    <div class="res-hdr">
+      <div class="card-title" style="margin:0">📋 결과</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn btn-out btn-sm" onclick="exportXlsx()">📥 Excel</button>
+        <button class="btn btn-out btn-sm" onclick="copyCSV()">📋 CSV 복사</button>
+      </div>
+    </div>
+
+    <div class="sum-grid" id="sumGrid"></div>
+
+    <div class="filter-bar">
+      <input type="text" id="filterQ" placeholder="URL 검색..." oninput="filterTable()">
+      <select id="filterPlatform" onchange="filterTable()">
+        <option value="">모든 플랫폼</option>
+        <option>YouTube Shorts</option>
+        <option>TikTok</option>
+        <option>Instagram Reels</option>
+      </select>
+      <select id="filterStatus" onchange="filterTable()">
+        <option value="">모든 상태</option>
+        <option value="ok">성공만</option>
+        <option value="err">오류만</option>
+      </select>
+      <span style="font-size:12px;color:var(--dim);align-self:center" id="filterInfo"></span>
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>플랫폼</th>
+            <th>URL</th>
+            <th class="r" onclick="sortBy('views')" style="cursor:pointer" title="클릭해서 정렬">Views ↕</th>
+            <th class="r" onclick="sortBy('likes')" style="cursor:pointer" title="클릭해서 정렬">Likes ↕</th>
+            <th class="r" onclick="sortBy('comments')" style="cursor:pointer" title="클릭해서 정렬">Comments ↕</th>
+            <th class="r">Shares</th>
+            <th>상태</th>
+          </tr>
+        </thead>
+        <tbody id="tBody"></tbody>
+      </table>
+    </div>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px" id="rowCount"></div>
+  </div>
+
+</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const CFG = {
+  url:        localStorage.getItem('sa_url') || '',
+  delay:      parseFloat(localStorage.getItem('sa_delay') || '0.3'),
+  concurrent: parseInt(localStorage.getItem('sa_conc')  || '10'),
+};
+
+document.getElementById('cfgUrl').value        = CFG.url;
+document.getElementById('cfgDelay').value      = CFG.delay;
+document.getElementById('cfgConcurrent').value = CFG.concurrent;
+
+if (!CFG.url) document.getElementById('noBackendAlert').style.display = 'flex';
+
+function showSettings(){
+  document.getElementById('testResult').style.display = 'none';
+  document.getElementById('ov').classList.add('on');
+}
+function closeSettings(){ document.getElementById('ov').classList.remove('on'); }
+function ovClick(e){ if(e.target.id==='ov') closeSettings(); }
+
+async function testBackend(){
+  const u = document.getElementById('cfgUrl').value.trim().replace(/\/$/,'');
+  const el = document.getElementById('testResult');
+  el.style.display='block';
+  el.className='alert a-warn';
+  el.textContent='⏳ 연결 확인 중...';
+  try {
+    const r = await fetch(u+'/health',{signal:AbortSignal.timeout(8000)});
+    const d = await r.json();
+    el.className = d.ok ? 'alert a-green' : 'alert a-warn';
+    el.textContent = d.ok ? '✅ 연결 성공! API가 정상 동작 중입니다.' : '⚠ 응답이 올바르지 않습니다.';
+  } catch(e){
+    el.className='alert a-warn';
+    el.textContent='❌ 연결 실패: '+e.message;
+  }
+}
+
+function saveSettings(){
+  CFG.url        = document.getElementById('cfgUrl').value.trim().replace(/\/$/,'');
+  CFG.delay      = parseFloat(document.getElementById('cfgDelay').value)||0.3;
+  CFG.concurrent = parseInt(document.getElementById('cfgConcurrent').value)||10;
+  localStorage.setItem('sa_url',   CFG.url);
+  localStorage.setItem('sa_delay', CFG.delay);
+  localStorage.setItem('sa_conc',  CFG.concurrent);
+  document.getElementById('noBackendAlert').style.display = CFG.url ? 'none' : 'flex';
+  closeSettings();
+}
+
+// ── Tabs ────────────────────────────────────────────────────────────────────
+function switchTab(id, el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('on'));
+  el.classList.add('on');
+  document.getElementById('pane-'+id).classList.add('on');
+}
+
+// ── File drop ───────────────────────────────────────────────────────────────
+function dov(e){ e.preventDefault(); document.getElementById('dropzone').classList.add('over'); }
+function dol(){ document.getElementById('dropzone').classList.remove('over'); }
+function dod(e){ e.preventDefault(); dol(); if(e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); }
+function onFileSelect(e){ if(e.target.files[0]) loadFile(e.target.files[0]); }
+
+let WB_DATA = null; // raw workbook rows
+
+function loadFile(file){
+  const r = new FileReader();
+  r.onload = e => {
+    try {
+      const wb = XLSX.read(e.target.result, {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      WB_DATA = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+      const rows = WB_DATA.filter(r=>r.some(c=>c)).length;
+      document.getElementById('excelInfo').style.display = 'block';
+      document.getElementById('excelAlert').textContent =
+        `✅ "${file.name}" 로드 완료 — ${rows}행`;
+      document.getElementById('dropIcon').textContent = '✅';
+      document.getElementById('dropText').innerHTML =
+        `<strong>${file.name}</strong><br><span style="color:var(--green)">${rows}행 로드됨</span>`;
+    } catch(err){ alert('파일 읽기 오류: '+err.message); }
+  };
+  r.readAsArrayBuffer(file);
+}
+
+function previewExcel(){
+  if(!WB_DATA){ alert('파일을 먼저 업로드하세요.'); return; }
+  const col = parseInt(document.getElementById('colNum').value||'1')-1;
+  const urls = extractExcelUrls(col);
+  alert(`열 ${col+1}: URL ${urls.length}개 감지\n\n샘플:\n${urls.slice(0,5).join('\n')}`);
+}
+
+function extractExcelUrls(col){
+  if(!WB_DATA) return [];
+  return WB_DATA
+    .filter(row => row[col] && String(row[col]).trim().startsWith('http'))
+    .map(row => String(row[col]).trim());
+}
+
+// ── URL textarea ─────────────────────────────────────────────────────────────
+document.getElementById('urlBox').addEventListener('input', countUrls);
+function countUrls(){
+  const n = extractTextUrls().length;
+  document.getElementById('urlCnt').textContent = n+'개 URL';
+}
+function extractTextUrls(){
+  return document.getElementById('urlBox').value
+    .split('\n').map(l=>l.trim()).filter(l=>l.startsWith('http'));
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+let S = { results:[], ok:0, err:0, done:0, total:0, views:0, running:false };
+let sortKey = null, sortAsc = false;
+let abortCtrl = null;
+
+// ── Run ──────────────────────────────────────────────────────────────────────
+async function run(){
+  if(!CFG.url){ showSettings(); return; }
+
+  const activeExcel = document.querySelector('.tab.on').textContent.includes('Excel');
+  let urls;
+  if(activeExcel){
+    if(!WB_DATA){ alert('Excel 파일을 먼저 업로드하세요.'); return; }
+    const col = parseInt(document.getElementById('colNum').value||'1')-1;
+    urls = extractExcelUrls(col);
+  } else {
+    urls = extractTextUrls();
+  }
+
+  if(!urls.length){ alert('분석할 URL이 없습니다.'); return; }
+
+  // Reset
+  S = { results:[], ok:0, err:0, done:0, total:urls.length, views:0, running:true };
+  sortKey = null;
+
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('stopBtn').style.display = '';
+  document.getElementById('progCard').classList.add('on');
+  document.getElementById('resCard').style.display = 'none';
+  document.getElementById('tBody').innerHTML = '';
+  document.getElementById('sumGrid').innerHTML = '';
+  updateProg();
+
+  abortCtrl = new AbortController();
+
+  try {
+    const resp = await fetch(CFG.url+'/analyze', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ urls, delay: CFG.delay, concurrent: CFG.concurrent }),
+      signal: abortCtrl.signal,
+    });
+
+    if(!resp.ok) throw new Error('서버 오류 '+resp.status);
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for(const line of lines){
+        if(line.startsWith('data: ')){
+          try {
+            const d = JSON.parse(line.slice(6));
+            if(d.done){ finish(); return; }
+            onResult(d);
+          } catch{}
+        }
+      }
+    }
+    finish();
+  } catch(e){
+    if(e.name !== 'AbortError') alert('오류: '+e.message);
+    done2();
+  }
+}
+
+function stop(){
+  if(abortCtrl) abortCtrl.abort();
+  S.running = false;
+  document.getElementById('curUrl').textContent = '⏹ 중지됨';
+  done2();
+}
+
+function done2(){
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('stopBtn').style.display = 'none';
+}
+
+function finish(){
+  S.running = false;
+  document.getElementById('curUrl').textContent =
+    `완료! ${S.ok}개 성공 · ${S.err}개 오류`;
+  done2();
+  updateSummary();
+}
+
+function onResult(d){
+  S.results.push(d);
+  S.done++;
+  if(d.status==='Success'){ S.ok++; S.views += (d.views||0); }
+  else S.err++;
+
+  updateProg();
+  document.getElementById('curUrl').textContent =
+    '처리 중: '+(d.url.length>80?d.url.slice(0,80)+'…':d.url);
+
+  document.getElementById('resCard').style.display = 'block';
+  appendRow(d);
+  updateSummary();
+  updateRowCount();
+}
+
+// ── Progress ─────────────────────────────────────────────────────────────────
+function updateProg(){
+  const p = S.total ? Math.round(S.done/S.total*100) : 0;
+  document.getElementById('progBar').style.width  = p+'%';
+  document.getElementById('progTxt').textContent  = S.done+' / '+S.total;
+  document.getElementById('progPct').textContent  = p+'%';
+  document.getElementById('cOk').textContent      = S.ok;
+  document.getElementById('cErr').textContent     = S.err;
+  document.getElementById('cPend').textContent    = S.total-S.done;
+  document.getElementById('cViews').textContent   = S.views.toLocaleString();
+}
+
+// ── Table ─────────────────────────────────────────────────────────────────────
+const BADGES = {
+  'YouTube Shorts': '<span class="badge yt">▶ YouTube</span>',
+  'TikTok':         '<span class="badge tt">♪ TikTok</span>',
+  'Instagram Reels':'<span class="badge ig">◈ Instagram</span>',
+};
+
+function fmtN(n){
+  if(n==null||n===undefined) return '<span class="na">N/A</span>';
+  return Number(n).toLocaleString();
+}
+
+function appendRow(d){
+  const ok = d.status==='Success';
+  const tr = document.createElement('tr');
+  tr.className = ok?'tr-ok':'tr-err';
+  tr.dataset.url      = d.url.toLowerCase();
+  tr.dataset.platform = (d.platform||'').toLowerCase();
+  tr.dataset.ok       = ok?'1':'0';
+  tr.innerHTML = `
+    <td style="color:var(--dim);font-size:11px">${d.idx}</td>
+    <td>${BADGES[d.platform]||d.platform||''}</td>
+    <td class="url-td"><a href="${esc(d.url)}" target="_blank" title="${esc(d.url)}">${esc(short(d.url))}</a></td>
+    <td class="r">${fmtN(d.views)}</td>
+    <td class="r">${fmtN(d.likes)}</td>
+    <td class="r">${fmtN(d.comments)}</td>
+    <td class="r">${fmtN(d.shares)}</td>
+    <td><span class="${ok?'s-ok':'s-err'}">${ok?'✓ OK':esc(d.status)}</span></td>`;
+  document.getElementById('tBody').appendChild(tr);
+  // auto-scroll
+  const tw = document.querySelector('.tbl-wrap');
+  if(tw.scrollTop+tw.clientHeight>tw.scrollHeight-80) tw.scrollTop=tw.scrollHeight;
+}
+
+function short(u){ return u.length>50?u.slice(0,50)+'…':u; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Filter & Sort ─────────────────────────────────────────────────────────────
+function filterTable(){
+  const q  = document.getElementById('filterQ').value.toLowerCase();
+  const pl = document.getElementById('filterPlatform').value.toLowerCase();
+  const st = document.getElementById('filterStatus').value;
+  let vis = 0;
+  document.querySelectorAll('#tBody tr').forEach(tr=>{
+    const show =
+      (!q  || tr.dataset.url.includes(q)) &&
+      (!pl || tr.dataset.platform.includes(pl)) &&
+      (!st || (st==='ok'?tr.dataset.ok==='1':tr.dataset.ok==='0'));
+    tr.style.display = show?'':'none';
+    if(show) vis++;
+  });
+  updateRowCount(vis);
+}
+
+function updateRowCount(vis){
+  const n = vis!=null ? vis : document.querySelectorAll('#tBody tr:not([style*="none"])').length;
+  document.getElementById('rowCount').textContent =
+    `표시: ${n}행 / 전체: ${S.results.length}행`;
+}
+
+function sortBy(key){
+  if(sortKey===key) sortAsc=!sortAsc; else{ sortKey=key; sortAsc=false; }
+  const rows = [...document.querySelectorAll('#tBody tr')];
+  rows.sort((a,b)=>{
+    const ai = parseInt(a.querySelector('td:first-child').textContent)-1;
+    const bi = parseInt(b.querySelector('td:first-child').textContent)-1;
+    const av = S.results[ai]?.[key]??-1;
+    const bv = S.results[bi]?.[key]??-1;
+    return sortAsc ? av-bv : bv-av;
+  });
+  const tbody = document.getElementById('tBody');
+  rows.forEach(r=>tbody.appendChild(r));
+}
+
+// ── Summary ──────────────────────────────────────────────────────────────────
+function updateSummary(){
+  const cards = [
+    {v:S.total, l:'전체 URL', c:'c-blue'},
+    {v:S.ok,    l:'성공',    c:'c-green'},
+    {v:S.err,   l:'오류',    c:'c-red'},
+    {v:S.views.toLocaleString(), l:'총 조회수', c:'c-yellow'},
+  ];
+  document.getElementById('sumGrid').innerHTML = cards.map(c=>
+    `<div class="sum-card"><div class="sum-val ${c.c}">${c.v}</div><div class="sum-lbl">${c.l}</div></div>`
+  ).join('');
+}
+
+// ── Export ───────────────────────────────────────────────────────────────────
+function exportXlsx(){
+  if(!S.results.length){ alert('결과가 없습니다.'); return; }
+  const hdr = ['#','Platform','URL','Views','Likes','Comments','Shares','Saves','Status'];
+  const rows = S.results.map(r=>[
+    r.idx, r.platform, r.url,
+    r.views??'', r.likes??'', r.comments??'', r.shares??'', '', r.status
+  ]);
+  const ws = XLSX.utils.aoa_to_sheet([hdr,...rows]);
+  ws['!cols']=[{wch:5},{wch:18},{wch:55},{wch:13},{wch:13},{wch:13},{wch:13},{wch:8},{wch:22}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Results');
+  XLSX.writeFile(wb, 'shorts_analyzer_results.xlsx');
+}
+
+function copyCSV(){
+  if(!S.results.length){ alert('결과가 없습니다.'); return; }
+  const hdr = '#,Platform,URL,Views,Likes,Comments,Shares,Status';
+  const rows = S.results.map(r=>
+    [r.idx, r.platform, '"'+r.url+'"',
+     r.views??'N/A', r.likes??'N/A', r.comments??'N/A', r.shares??'N/A', r.status].join(',')
+  );
+  navigator.clipboard.writeText([hdr,...rows].join('\n'))
+    .then(()=>alert('CSV가 클립보드에 복사되었습니다!'))
+    .catch(()=>alert('클립보드 접근 실패'));
+}
+</script>
+</body>
+</html>

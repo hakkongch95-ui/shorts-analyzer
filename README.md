@@ -1,138 +1,112 @@
-# Shorts Analyzer
+# 🎬 Shorts Analyzer
 
-> Fetch engagement metrics for **YouTube Shorts**, **TikTok**, and **Instagram Reels** directly from an Excel file.
+> YouTube Shorts · TikTok · Instagram Reels 의 Views, Likes, Comments, Shares를  
+> Excel 파일에서 일괄 수집합니다. **300개 이상 URL 병렬 처리 지원.**
+
+**🌐 웹 UI:** https://hakkongch95-ui.github.io/shorts-analyzer/
 
 ---
 
-## Features
+## 지원 지표
 
-| Platform | Views | Likes | Comments | Shares | Saves |
+| 플랫폼 | Views | Likes | Comments | Shares | Saves |
 |---|:---:|:---:|:---:|:---:|:---:|
-| YouTube Shorts | ✅ | ✅ * | ✅ | — | — |
+| YouTube Shorts | ✅ | ✅* | ✅ | — | — |
 | TikTok | ✅ | ✅ | ✅ | ✅ | — |
 | Instagram Reels | ✅ | ✅ | ✅ | — | — |
 
-> \* YouTube likes may be hidden by the creator.  
-> Saves are never publicly accessible on any platform.
+> \* YouTube 좋아요는 크리에이터가 숨길 경우 N/A  
+> Saves는 모든 플랫폼에서 비공개 지표 (항상 N/A)
 
 ---
 
-## Requirements
+## 🚀 웹 UI 사용 방법
 
-- Python **3.8+**
-- Internet connection
+### 1단계 — 백엔드 배포 (Render.com, 무료)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/hakkongch95-ui/shorts-analyzer)
+
+버튼 클릭 → Render.com 계정으로 로그인 → **"Apply"** 클릭  
+배포 완료 후 `https://shorts-analyzer-api.onrender.com` 형태의 URL 발급됨
+
+### 2단계 — 프론트엔드 설정
+
+1. https://hakkongch95-ui.github.io/shorts-analyzer/ 접속
+2. **⚙ 설정** 클릭
+3. **백엔드 API URL** 에 Render 주소 입력 → **연결 테스트** → **저장**
+
+### 3단계 — 분석
+
+- **Excel 업로드**: URL이 담긴 Excel 파일을 드래그 → 열 번호 지정 → 🚀 분석 시작
+- **직접 입력**: URL을 한 줄씩 붙여넣기 → 🚀 분석 시작
+- 결과는 실시간으로 표에 표시되며, Excel / CSV로 다운로드 가능
 
 ---
 
-## Installation
+## 💻 CLI 사용 방법 (로컬 Python)
+
+### 설치
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/hakkongch95-ui/shorts-analyzer.git
 cd shorts-analyzer
-
-# 2. (Recommended) Create a virtual environment
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS / Linux:
-source .venv/bin/activate
-
-# 3. Install dependencies
+# Windows:  .venv\Scripts\activate
+# Mac/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
----
-
-## Usage
-
-### Prepare your Excel file
-
-Put video URLs in **column A** (one URL per row). A header row is optional.
-
-```
-| Video URL                                          |
-|----------------------------------------------------|
-| https://www.youtube.com/shorts/abc123              |
-| https://www.tiktok.com/@user/video/123456789       |
-| https://www.instagram.com/reel/xyz789/             |
-```
-
-### Run
+### 실행
 
 ```bash
-# Basic — results saved as input_analyzed.xlsx
+# 기본 사용
 python shorts_analyzer.py urls.xlsx
 
-# URLs are in column B (2)
-python shorts_analyzer.py urls.xlsx --column 2
+# URL이 D열(4번)에 있는 경우
+python shorts_analyzer.py urls.xlsx --column 4
 
-# Custom output file name
+# 출력 파일 지정
 python shorts_analyzer.py urls.xlsx --output results.xlsx
 
-# Use cookies for login-required / age-restricted content
+# Instagram 비공개 콘텐츠 (쿠키 파일 필요)
 python shorts_analyzer.py urls.xlsx --cookies cookies.txt
-
-# Adjust delay between requests (default: 1.5 s)
-python shorts_analyzer.py urls.xlsx --delay 2
 ```
-
-### Output
-
-The script writes these columns **immediately to the right** of your URL column:
-
-| Platform | Views | Likes | Comments | Shares | Saves | Status |
-|---|---|---|---|---|---|---|
-| YouTube Shorts | 1,234,567 | 45,678 | 3,210 | N/A | N/A | Success |
-| TikTok | 9,876,543 | 512,300 | 28,400 | 74,200 | N/A | Success |
-| Instagram Reels | 234,100 | 18,900 | 1,540 | N/A | N/A | Success |
-
-Rows are **colour-coded**: green = success, red = error, yellow = N/A.
 
 ---
 
-## Handling Login-Required Content
-
-Some Instagram or TikTok posts require a logged-in session.
-
-1. Install a browser extension such as **Get cookies.txt LOCALLY** (Chrome / Firefox).
-2. Visit the platform while logged in and export `cookies.txt` (Netscape format).
-3. Pass the file to the script:
+## 🛠 백엔드 직접 실행
 
 ```bash
-python shorts_analyzer.py urls.xlsx --cookies cookies.txt
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8000
+# → http://localhost:8000
+# 웹 UI 설정에서 http://localhost:8000 입력 후 사용
 ```
 
-> **Never commit `cookies.txt` to Git.** It is already in `.gitignore`.
+---
+
+## ⚙ 300+ URL 최적화
+
+백엔드는 플랫폼별 비동기 병렬 처리를 사용합니다:
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| 동시 처리 수 | 10 | 최대 20까지 설정 가능 |
+| 요청 지연 | 0.3s | 0 = 최대 속도 (차단 위험) |
+
+> Instagram은 반복 요청 시 차단될 수 있습니다. 100개 이상은 지연 0.5s 이상 권장.
 
 ---
 
-## Error Reference
+## 오류 코드
 
-| Status | Meaning |
+| 상태 | 의미 |
 |---|---|
-| `Success` | Metrics fetched successfully |
-| `Private / Unavailable` | Video is private or account is suspended |
-| `Not Found (404)` | URL is broken or video was deleted |
-| `Login Required — use --cookies` | Content requires authentication |
-| `Video Removed` | Video was taken down |
-| `Error: ...` | Unexpected error (message shown inline) |
-
----
-
-## Limitations
-
-- **Saves** are an internal metric on all platforms and cannot be scraped publicly.
-- **Shares** are only available on TikTok.
-- Instagram may block repeated requests — use `--delay 3` or `--cookies` if needed.
-- YouTube like counts are hidden when the creator disables them.
-- Metrics reflect the value **at the time the script is run**.
-
----
-
-## Contributing
-
-Pull requests are welcome. Please open an issue first to discuss larger changes.
+| `Success` | 정상 수집 |
+| `Private / Unavailable` | 비공개 또는 계정 정지 |
+| `Not Found (404)` | 삭제되었거나 URL 오류 |
+| `Login Required` | 로그인 필요 (`--cookies` 사용) |
+| `Video Removed` | 영상 삭제됨 |
 
 ---
 
