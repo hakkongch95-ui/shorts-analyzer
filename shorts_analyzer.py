@@ -127,6 +127,21 @@ def fetch_metrics(url: str, cookies_file: str = None) -> dict:
 
 # ── Excel I/O ──────────────────────────────────────────────────────────────────
 
+# Maps lowercase header names in the spreadsheet → metrics dict key
+HEADER_TO_METRIC = {
+    "views":    "views",
+    "view":     "views",
+    "likes":    "likes",
+    "like":     "likes",
+    "comments": "comments",
+    "comment":  "comments",
+    "shares":   "shares",
+    "share":    "shares",
+    "saves":    "saves",
+    "save":     "saves",
+}
+
+
 def _style_header_cell(cell, text: str):
     cell.value = text
     cell.font      = Font(bold=True, color=HEADER_FG)
@@ -137,6 +152,20 @@ def _style_header_cell(cell, text: str):
 def _style_data_cell(cell, bg: str):
     cell.fill      = PatternFill(start_color=bg, end_color=bg, fill_type="solid")
     cell.alignment = Alignment(horizontal="center", vertical="center")
+
+
+def _find_existing_metric_columns(ws, header_row: int) -> dict:
+    """
+    Scan header_row and return {metric_key: col_index} for any column whose
+    header matches a known metric name (case-insensitive).
+    """
+    mapping = {}
+    for cell in ws[header_row]:
+        if cell.value and isinstance(cell.value, str):
+            key = HEADER_TO_METRIC.get(cell.value.strip().lower())
+            if key:
+                mapping[key] = cell.column
+    return mapping
 
 
 def process_excel(
@@ -163,14 +192,23 @@ def process_excel(
     start_row  = 2 if has_header else 1
     header_row = 1 if has_header else None
 
-    metrics_start_col = url_column + 1
-
-    # ── write metric headers ───────────────────────────────────────────────────
+    # ── detect existing metric columns vs. append mode ─────────────────────────
+    existing_cols = {}
     if header_row:
-        for i, h in enumerate(METRIC_HEADERS):
-            _style_header_cell(
-                ws.cell(row=header_row, column=metrics_start_col + i), h
-            )
+        existing_cols = _find_existing_metric_columns(ws, header_row)
+
+    use_existing = bool(existing_cols)
+    metrics_start_col = url_column + 1  # fallback for append mode
+
+    if use_existing:
+        print(f"Detected existing metric columns: { {k: get_column_letter(v) for k,v in existing_cols.items()} }")
+    else:
+        # Write fresh metric headers
+        if header_row:
+            for i, h in enumerate(METRIC_HEADERS):
+                _style_header_cell(
+                    ws.cell(row=header_row, column=metrics_start_col + i), h
+                )
 
     # ── collect valid URLs ─────────────────────────────────────────────────────
     rows_to_process = []
@@ -193,46 +231,54 @@ def process_excel(
         print(f"[{idx:>3}/{total}]  {url[:72]}")
         metrics = fetch_metrics(url, cookies_file)
 
-        values = [
-            metrics["platform"],
-            metrics["views"],
-            metrics["likes"],
-            metrics["comments"],
-            metrics["shares"],
-            metrics["saves"],
-            metrics["status"],
-        ]
-
         success = metrics["status"] == "Success"
         bg = SUCCESS_BG if success else ERROR_BG
 
-        for col_offset, val in enumerate(values):
-            c = ws.cell(row=row_num, column=metrics_start_col + col_offset)
-            c.value = val
-            _style_data_cell(c, bg)
-            # Saves column always gets yellow bg (always N/A)
-            if col_offset == 5:
-                _style_data_cell(c, NA_BG)
+        if use_existing:
+            # Write into pre-existing named columns
+            for metric_key, col_idx in existing_cols.items():
+                val = metrics.get(metric_key)
+                c = ws.cell(row=row_num, column=col_idx)
+                c.value = val
+                cell_bg = NA_BG if metric_key == "saves" else bg
+                _style_data_cell(c, cell_bg)
+        else:
+            # Append mode: write all metrics right after URL column
+            values = [
+                metrics["platform"],
+                metrics["views"],
+                metrics["likes"],
+                metrics["comments"],
+                metrics["shares"],
+                metrics["saves"],
+                metrics["status"],
+            ]
+            for col_offset, val in enumerate(values):
+                c = ws.cell(row=row_num, column=metrics_start_col + col_offset)
+                c.value = val
+                cell_bg = NA_BG if col_offset == 5 else bg
+                _style_data_cell(c, cell_bg)
 
         if success:
             ok_count += 1
             print(
-                f"         ✓  Views:{fmt(metrics['views']):>12}  "
+                f"         OK  Views:{fmt(metrics['views']):>12}  "
                 f"Likes:{fmt(metrics['likes']):>12}  "
                 f"Comments:{fmt(metrics['comments']):>10}  "
                 f"Shares:{fmt(metrics['shares']):>10}"
             )
         else:
             err_count += 1
-            print(f"         ✗  {metrics['status']}")
+            print(f"         NG  {metrics['status']}")
 
         if idx < total:
             time.sleep(delay)
 
     # ── auto-width ─────────────────────────────────────────────────────────────
-    for col_offset, header in enumerate(METRIC_HEADERS):
-        col_letter = get_column_letter(metrics_start_col + col_offset)
-        ws.column_dimensions[col_letter].width = max(14, len(header) + 6)
+    if not use_existing:
+        for col_offset, header in enumerate(METRIC_HEADERS):
+            col_letter = get_column_letter(metrics_start_col + col_offset)
+            ws.column_dimensions[col_letter].width = max(14, len(header) + 6)
 
     wb.save(output_path)
 
