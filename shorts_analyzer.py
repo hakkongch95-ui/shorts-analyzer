@@ -10,6 +10,7 @@ Usage:
     python shorts_analyzer.py input.xlsx --cookies cookies.txt
 """
 
+import re
 import sys
 import time
 import argparse
@@ -28,6 +29,21 @@ try:
 except ImportError:
     print("Error: openpyxl not installed. Run: pip install openpyxl")
     sys.exit(1)
+
+try:
+    import instaloader
+    _INSTALOADER = instaloader.Instaloader(
+        quiet=True,
+        download_pictures=False,
+        download_videos=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+    )
+    _INSTALOADER_AVAILABLE = True
+except ImportError:
+    _INSTALOADER_AVAILABLE = False
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -65,19 +81,76 @@ def fmt(n) -> str:
 
 # ── Core fetch ─────────────────────────────────────────────────────────────────
 
+def _extract_instagram_shortcode(url: str):
+    """Extract shortcode from /p/CODE/ or /reel/CODE/ Instagram URLs."""
+    m = re.search(r'/(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
+    return m.group(1) if m else None
+
+
+def fetch_instagram_metrics(url: str) -> dict:
+    """
+    Use instaloader to fetch Instagram Reels/post metrics.
+    Returns views (video_view_count), likes, and comments for public posts.
+    """
+    base = {
+        "platform": "Instagram Reels",
+        "views":    None,
+        "likes":    None,
+        "comments": None,
+        "shares":   None,
+        "saves":    None,
+        "status":   "Success",
+    }
+
+    if not _INSTALOADER_AVAILABLE:
+        base["status"] = "Error: instaloader not installed — run: pip install instaloader"
+        return base
+
+    shortcode = _extract_instagram_shortcode(url)
+    if not shortcode:
+        base["status"] = "Error: could not parse Instagram shortcode from URL"
+        return base
+
+    try:
+        post = instaloader.Post.from_shortcode(_INSTALOADER.context, shortcode)
+        base.update({
+            "views":    post.video_view_count if post.is_video else None,
+            "likes":    post.likes,
+            "comments": post.comments,
+        })
+        return base
+
+    except instaloader.exceptions.LoginRequiredException:
+        base["status"] = "Login Required — use --cookies"
+        return base
+    except instaloader.exceptions.ProfileNotExistsException:
+        base["status"] = "Not Found (404)"
+        return base
+    except Exception as e:
+        msg = str(e).lower()
+        if "private" in msg:
+            base["status"] = "Private / Unavailable"
+        elif "404" in msg or "not found" in msg:
+            base["status"] = "Not Found (404)"
+        else:
+            base["status"] = f"Error: {str(e)[:90]}"
+        return base
+
+
 def fetch_metrics(url: str, cookies_file: str = None) -> dict:
     """
-    Use yt-dlp to extract engagement metrics for a given video URL.
-    Returns a dict with keys: platform, views, likes, comments, shares, saves, status.
+    Route to the appropriate fetcher based on platform.
 
-    Note:
-      - 'saves' is not publicly exposed by any platform; always returns None.
-      - 'likes' may be None for YouTube if the creator has disabled the count.
-      - 'shares' is only available on TikTok (as repost_count).
+    - Instagram  → instaloader  (supports video_view_count)
+    - YouTube    → yt-dlp
+    - TikTok     → yt-dlp
     """
+    if "instagram.com" in url.lower():
+        return fetch_instagram_metrics(url)
+
     opts = {
-        "quiet":        True,
-        "no_warnings":  True,
+        "quiet":         True,
+        "no_warnings":   True,
         "skip_download": True,
     }
     if cookies_file:
@@ -89,7 +162,7 @@ def fetch_metrics(url: str, cookies_file: str = None) -> dict:
         "likes":    None,
         "comments": None,
         "shares":   None,
-        "saves":    None,   # never publicly available
+        "saves":    None,
         "status":   "Success",
     }
 
