@@ -1,12 +1,14 @@
 """
-Shorts Analyzer — FastAPI Backend v1.3.0
-- YouTube: Data API v3 (key provided) → HTML 스크래핑 → yt-dlp fallback
-- TikTok:  TikWM API (서버 IP 차단 우회, 1 req/s 제한 준수)
-- Instagram: instaloader
+Shorts Analyzer — FastAPI Backend v1.5.0
+- YouTube: Data API v3 (yt_key) → HTML scraping → yt-dlp
+- TikTok:  TikWM API (residential proxy, 1 req/s)
+- Instagram: instaloader with session auth (INSTAGRAM_SESSION_ID env var)
+             → yt-dlp fallback
 """
 
 import asyncio
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -23,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.4.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,20 +36,28 @@ app.add_middleware(
 
 # ── Shared instances ──────────────────────────────────────────────────────────
 
-_instaloader = instaloader.Instaloader(
-    quiet=True,
-    download_pictures=False,
-    download_videos=False,
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-)
+def _make_instaloader() -> instaloader.Instaloader:
+    L = instaloader.Instaloader(
+        quiet=True,
+        download_pictures=False,
+        download_videos=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+    )
+    session_id = os.environ.get("INSTAGRAM_SESSION_ID", "").strip()
+    if session_id:
+        # 세션 쿠키로 인증 (로그인 불필요)
+        L.context._session.cookies.set("sessionid", session_id, domain=".instagram.com")
+        L.context._session.cookies.set("ds_user_id", "", domain=".instagram.com")
+    return L
 
+_instaloader = _make_instaloader()
 _executor = ThreadPoolExecutor(max_workers=20)
 
-# TikTok: 1 req/s 제한 준수
-_tiktok_sem = asyncio.Semaphore(1)
+# TikTok: 1 req/s 제한
+_tiktok_sem: Optional[asyncio.Semaphore] = None
 
 _YT_HEADERS = {
     "User-Agent": (
@@ -78,21 +88,21 @@ def _platform_display(url: str) -> str:
 
 def _classify_error(msg: str) -> str:
     m = msg.lower()
-    if "private" in m:                              return "Private / Unavailable"
-    if "404" in m or "not found" in m:              return "Not Found (404)"
+    if "private" in m:                               return "Private / Unavailable"
+    if "404" in m or "not found" in m:               return "Not Found (404)"
     if "login" in m or "sign in" in m or "bot" in m: return "Login Required"
-    if "removed" in m or "deleted" in m:            return "Video Removed"
-    if "queryre" in m:                              return "Not Found (404)"
+    if "removed" in m or "deleted" in m:             return "Video Removed"
+    if "queryre" in m:                               return "Not Found (404)"
     return f"Error: {msg[:80]}"
 
 def _extract_youtube_id(url: str) -> Optional[str]:
     m = re.search(r"(?:shorts/|watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
     return m.group(1) if m else None
 
-def _parse_int(s: Optional[str]) -> Optional[int]:
+def _parse_int(s) -> Optional[int]:
     if s is None:
         return None
-    digits = re.sub(r"[^\d]", "", s)
+    digits = re.sub(r"[^\d]", "", str(s))
     return int(digits) if digits else None
 
 # ── Platform fetchers ─────────────────────────────────────────────────────────
@@ -103,7 +113,7 @@ def _fetch_instagram(url: str) -> dict:
         raise ValueError("Instagram URL 파싱 실패")
     shortcode = m.group(1)
 
-    # 1차: instaloader (view_count 포함)
+    # 1차: instaloader (세션 있으면 인증된 요청)
     try:
         post = instaloader.Post.from_shortcode(_instaloader.context, shortcode)
         return {
@@ -115,7 +125,7 @@ def _fetch_instagram(url: str) -> dict:
     except Exception:
         pass
 
-    # 2차: yt-dlp fallback (views는 None일 수 있음)
+    # 2차: yt-dlp fallback
     opts = {"quiet": True, "no_warnings": True, "skip_download": True}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -146,7 +156,6 @@ def _fetch_tiktok_tikwm(url: str) -> dict:
     }
 
 def _fetch_youtube_api(video_id: str, yt_key: str) -> dict:
-    """YouTube Data API v3 — 키 있을 때 최우선."""
     resp = _requests.get(
         "https://www.googleapis.com/youtube/v3/videos",
         params={"part": "statistics", "id": video_id, "key": yt_key},
@@ -168,29 +177,22 @@ def _fetch_youtube_api(video_id: str, yt_key: str) -> dict:
     }
 
 def _fetch_youtube_html(url: str) -> dict:
-    """HTML 스크래핑 — 키 없을 때 시도."""
     resp = _requests.get(url, headers=_YT_HEADERS, timeout=20, allow_redirects=True)
     resp.raise_for_status()
     html = resp.text
-
-    # 봇 감지 페이지인지 확인
-    if "SignIn" in html or "sign in" in html.lower() and "viewCount" not in html:
-        raise ValueError("Sign in to confirm you're not a bot")
-
+    if "viewCount" not in html:
+        raise ValueError("viewCount not found — bot block")
     views    = _parse_int(re.search(r'"viewCount":"(\d+)"', html) and
                           re.search(r'"viewCount":"(\d+)"', html).group(1))
     likes    = _parse_int(re.search(r'"likeCount":"(\d+)"', html) and
                           re.search(r'"likeCount":"(\d+)"', html).group(1))
     comments = _parse_int(re.search(r'"commentCount":\{"simpleText":"([^"]+)"', html) and
                           re.search(r'"commentCount":\{"simpleText":"([^"]+)"', html).group(1))
-
     if views is None:
-        raise ValueError("viewCount not found in HTML — possible bot block")
-
+        raise ValueError("viewCount parse failed")
     return {"views": views, "likes": likes, "comments": comments, "shares": None}
 
 def _fetch_youtube_ytdlp(url: str) -> dict:
-    """yt-dlp fallback (로컬 환경용)."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -207,24 +209,21 @@ def _fetch_youtube_ytdlp(url: str) -> dict:
     }
 
 def _fetch_youtube(url: str, yt_key: str) -> dict:
-    """우선순위: Data API → HTML 스크래핑 → yt-dlp."""
     vid = _extract_youtube_id(url)
-
     if yt_key and vid:
         return _fetch_youtube_api(vid, yt_key)
-
-    # HTML 스크래핑 시도
     try:
         return _fetch_youtube_html(url)
     except Exception:
         pass
-
-    # 마지막 수단: yt-dlp
     return _fetch_youtube_ytdlp(url)
 
 # ── Async fetch ────────────────────────────────────────────────────────────────
 
 async def _fetch_tiktok_async(url: str, loop) -> dict:
+    global _tiktok_sem
+    if _tiktok_sem is None:
+        _tiktok_sem = asyncio.Semaphore(1)
     async with _tiktok_sem:
         result = await loop.run_in_executor(_executor, _fetch_tiktok_tikwm, url)
         await asyncio.sleep(1.1)
@@ -251,9 +250,7 @@ async def _fetch_one(
             elif key == "tiktok":
                 raw = await _fetch_tiktok_async(url, loop)
             elif key == "youtube":
-                raw = await loop.run_in_executor(
-                    _executor, _fetch_youtube, url, yt_key
-                )
+                raw = await loop.run_in_executor(_executor, _fetch_youtube, url, yt_key)
             else:
                 raise ValueError("지원하지 않는 플랫폼")
 
@@ -307,4 +304,8 @@ async def analyze(req: AnalyzeRequest):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": "1.4.0"}
+    return {
+        "ok": True,
+        "version": "1.5.0",
+        "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
+    }
