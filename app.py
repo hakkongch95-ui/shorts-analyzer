@@ -23,7 +23,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.3.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,11 +101,28 @@ def _fetch_instagram(url: str) -> dict:
     m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Instagram URL 파싱 실패")
-    post = instaloader.Post.from_shortcode(_instaloader.context, m.group(1))
+    shortcode = m.group(1)
+
+    # 1차: instaloader (view_count 포함)
+    try:
+        post = instaloader.Post.from_shortcode(_instaloader.context, shortcode)
+        return {
+            "views":    post.video_view_count if post.is_video else None,
+            "likes":    post.likes,
+            "comments": post.comments,
+            "shares":   None,
+        }
+    except Exception:
+        pass
+
+    # 2차: yt-dlp fallback (views는 None일 수 있음)
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
     return {
-        "views":    post.video_view_count if post.is_video else None,
-        "likes":    post.likes,
-        "comments": post.comments,
+        "views":    info.get("view_count"),
+        "likes":    info.get("like_count"),
+        "comments": info.get("comment_count"),
         "shares":   None,
     }
 
@@ -290,4 +307,4 @@ async def analyze(req: AnalyzeRequest):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": "1.3.0"}
+    return {"ok": True, "version": "1.4.0"}
