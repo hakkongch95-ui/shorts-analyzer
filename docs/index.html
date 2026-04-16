@@ -579,7 +579,7 @@ async function runBackend(backendUrls){
     const resp = await fetch(CFG.url+'/analyze', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({urls:backendUrls, delay:CFG.delay, concurrent:CFG.concurrent}),
+      body: JSON.stringify({urls:backendUrls, delay:CFG.delay, concurrent:CFG.concurrent, yt_key:CFG.ytKey}),
       signal: abortCtrl.signal,
     });
     if(!resp.ok) throw new Error('서버 오류 '+resp.status);

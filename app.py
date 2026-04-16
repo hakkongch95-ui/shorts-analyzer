@@ -1,6 +1,8 @@
 """
-Shorts Analyzer — FastAPI Backend
-Async parallel scraping for YouTube Shorts, TikTok, Instagram Reels.
+Shorts Analyzer — FastAPI Backend v1.2.0
+- YouTube: YouTube Data API v3 (key from request) → yt-dlp fallback
+- TikTok:  TikWM API (서버 IP 차단 우회, 1 req/s 제한 준수)
+- Instagram: instaloader
 """
 
 import asyncio
@@ -14,13 +16,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import Optional
 
 import yt_dlp
 import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.1.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,13 +46,16 @@ _instaloader = instaloader.Instaloader(
 
 _executor = ThreadPoolExecutor(max_workers=20)
 
+# TikTok: 1 req/s 제한 준수용 전역 세마포어
+_tiktok_sem = asyncio.Semaphore(1)
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _platform_key(url: str) -> str:
     u = url.lower()
-    if "instagram.com" in u:                        return "instagram"
-    if "tiktok.com" in u:                           return "tiktok"
-    if "youtube.com" in u or "youtu.be" in u:       return "youtube"
+    if "instagram.com" in u:                   return "instagram"
+    if "tiktok.com" in u:                      return "tiktok"
+    if "youtube.com" in u or "youtu.be" in u:  return "youtube"
     return "other"
 
 def _platform_display(url: str) -> str:
@@ -62,17 +68,20 @@ def _platform_display(url: str) -> str:
 
 def _classify_error(msg: str) -> str:
     m = msg.lower()
-    if "private" in m:                     return "Private / Unavailable"
-    if "404" in m or "not found" in m:     return "Not Found (404)"
-    if "login" in m or "sign in" in m:     return "Login Required"
-    if "removed" in m or "deleted" in m:   return "Video Removed"
-    if "queryre" in m:                     return "Not Found (404)"
+    if "private" in m:                   return "Private / Unavailable"
+    if "404" in m or "not found" in m:   return "Not Found (404)"
+    if "login" in m or "sign in" in m or "bot" in m: return "Login Required"
+    if "removed" in m or "deleted" in m: return "Video Removed"
+    if "queryre" in m:                   return "Not Found (404)"
     return f"Error: {msg[:80]}"
+
+def _extract_youtube_id(url: str) -> Optional[str]:
+    m = re.search(r"(?:shorts/|watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else None
 
 # ── Platform fetchers (sync, run in executor) ─────────────────────────────────
 
 def _fetch_instagram(url: str) -> dict:
-    # /p/, /reel/, /reels/, /tv/ 모두 지원
     m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Instagram URL 파싱 실패")
@@ -84,8 +93,8 @@ def _fetch_instagram(url: str) -> dict:
         "shares":   None,
     }
 
-def _fetch_tiktok(url: str) -> dict:
-    """TikWM API 경유 — 서버 IP 차단 우회."""
+def _fetch_tiktok_tikwm(url: str) -> dict:
+    """TikWM API — 서버 IP 차단 우회. 동기 호출, executor에서 실행."""
     resp = _requests.get(
         "https://www.tikwm.com/api/",
         params={"url": url},
@@ -104,8 +113,30 @@ def _fetch_tiktok(url: str) -> dict:
         "shares":   d.get("share_count"),
     }
 
-def _fetch_youtube(url: str) -> dict:
-    """tv_embedded 클라이언트 — Login Required / format unavailable 우회."""
+def _fetch_youtube_api(video_id: str, yt_key: str) -> dict:
+    """YouTube Data API v3 — 데이터센터 IP 차단 없음."""
+    resp = _requests.get(
+        "https://www.googleapis.com/youtube/v3/videos",
+        params={"part": "statistics", "id": video_id, "key": yt_key},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if "error" in body:
+        raise ValueError(body["error"].get("message", "YouTube API error"))
+    items = body.get("items", [])
+    if not items:
+        raise ValueError("Not Found (404)")
+    s = items[0].get("statistics", {})
+    return {
+        "views":    int(s["viewCount"])    if "viewCount"    in s else None,
+        "likes":    int(s["likeCount"])    if "likeCount"    in s else None,
+        "comments": int(s["commentCount"]) if "commentCount" in s else None,
+        "shares":   None,
+    }
+
+def _fetch_youtube_ytdlp(url: str) -> dict:
+    """yt-dlp fallback (서버 IP 차단 위험, 로컬 환경용)."""
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -123,10 +154,18 @@ def _fetch_youtube(url: str) -> dict:
 
 # ── Async fetch ────────────────────────────────────────────────────────────────
 
+async def _fetch_tiktok_async(url: str, loop) -> dict:
+    """1 req/s 제한 준수: 전역 세마포어 + 1.1초 대기."""
+    async with _tiktok_sem:
+        result = await loop.run_in_executor(_executor, _fetch_tiktok_tikwm, url)
+        await asyncio.sleep(1.1)
+        return result
+
 async def _fetch_one(
     url: str, idx: int, total: int,
     semaphore: asyncio.Semaphore,
     delay: float,
+    yt_key: str,
 ) -> dict:
     async with semaphore:
         loop = asyncio.get_event_loop()
@@ -141,9 +180,17 @@ async def _fetch_one(
             if key == "instagram":
                 raw = await loop.run_in_executor(_executor, _fetch_instagram, url)
             elif key == "tiktok":
-                raw = await loop.run_in_executor(_executor, _fetch_tiktok, url)
+                raw = await _fetch_tiktok_async(url, loop)
+            elif key == "youtube":
+                vid = _extract_youtube_id(url)
+                if yt_key and vid:
+                    raw = await loop.run_in_executor(
+                        _executor, _fetch_youtube_api, vid, yt_key
+                    )
+                else:
+                    raw = await loop.run_in_executor(_executor, _fetch_youtube_ytdlp, url)
             else:
-                raw = await loop.run_in_executor(_executor, _fetch_youtube, url)
+                raise ValueError("지원하지 않는 플랫폼")
 
             base.update(raw)
             base["status"] = "Success"
@@ -157,11 +204,13 @@ async def _fetch_one(
 
 # ── SSE stream ─────────────────────────────────────────────────────────────────
 
-async def _stream(urls: list[str], delay: float, concurrent: int):
+async def _stream(urls: list[str], delay: float, concurrent: int, yt_key: str):
     semaphore = asyncio.Semaphore(concurrent)
 
     tasks = [
-        asyncio.create_task(_fetch_one(url, i + 1, len(urls), semaphore, delay))
+        asyncio.create_task(
+            _fetch_one(url, i + 1, len(urls), semaphore, delay, yt_key)
+        )
         for i, url in enumerate(urls)
     ]
 
@@ -177,6 +226,7 @@ class AnalyzeRequest(BaseModel):
     urls:       list[str]
     delay:      float = 0.3
     concurrent: int   = 10
+    yt_key:     str   = ""  # YouTube Data API v3 키 (선택)
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
@@ -188,11 +238,11 @@ async def analyze(req: AnalyzeRequest):
             unique.append(u)
 
     return StreamingResponse(
-        _stream(unique, req.delay, min(req.concurrent, 20)),
+        _stream(unique, req.delay, min(req.concurrent, 20), req.yt_key),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": "1.1.0"}
+    return {"ok": True, "version": "1.2.0"}
