@@ -425,6 +425,18 @@ function onFileSelect(e){ if(e.target.files[0]) loadFile(e.target.files[0]); }
 
 let WB_DATA = null; // raw workbook rows
 
+// Scan first 5 data rows to find which column contains http URLs
+function autoDetectUrlColumn(data){
+  const sampleRows = data.filter(r => r.some(c => c)).slice(0, 6);
+  if(!sampleRows.length) return -1;
+  const maxCols = Math.max(...sampleRows.map(r => r.length));
+  for(let col = 0; col < maxCols; col++){
+    const hasUrl = sampleRows.some(r => r[col] && String(r[col]).trim().startsWith('http'));
+    if(hasUrl) return col;
+  }
+  return -1;
+}
+
 function loadFile(file){
   const r = new FileReader();
   r.onload = e => {
@@ -433,12 +445,23 @@ function loadFile(file){
       const ws = wb.Sheets[wb.SheetNames[0]];
       WB_DATA = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
       const rows = WB_DATA.filter(r=>r.some(c=>c)).length;
+
+      // Auto-detect URL column
+      const detectedCol = autoDetectUrlColumn(WB_DATA);
+      if(detectedCol >= 0){
+        document.getElementById('colNum').value = detectedCol + 1;
+      }
+      const urlCount = extractExcelUrls(detectedCol >= 0 ? detectedCol : 0).length;
+      const colLabel = detectedCol >= 0
+        ? ` · URL열 자동감지: ${'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[detectedCol]}열 (${urlCount}개)`
+        : '';
+
       document.getElementById('excelInfo').style.display = 'block';
       document.getElementById('excelAlert').textContent =
-        `✅ "${file.name}" 로드 완료 — ${rows}행`;
+        `✅ "${file.name}" 로드 완료 — ${rows}행${colLabel}`;
       document.getElementById('dropIcon').textContent = '✅';
       document.getElementById('dropText').innerHTML =
-        `<strong>${file.name}</strong><br><span style="color:var(--green)">${rows}행 로드됨</span>`;
+        `<strong>${file.name}</strong><br><span style="color:var(--green)">${rows}행 로드됨${colLabel}</span>`;
     } catch(err){ alert('파일 읽기 오류: '+err.message); }
   };
   r.readAsArrayBuffer(file);
