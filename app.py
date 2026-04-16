@@ -1,13 +1,14 @@
 """
 Shorts Analyzer — FastAPI Backend
 Async parallel scraping for YouTube Shorts, TikTok, Instagram Reels.
-Deploy on Render.com: render.yaml included in repository root.
 """
 
 import asyncio
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
+
+import requests as _requests
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.0.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,9 +47,9 @@ _executor = ThreadPoolExecutor(max_workers=20)
 
 def _platform_key(url: str) -> str:
     u = url.lower()
-    if "instagram.com" in u:   return "instagram"
-    if "tiktok.com" in u:      return "tiktok"
-    if "youtube.com" in u or "youtu.be" in u: return "youtube"
+    if "instagram.com" in u:                        return "instagram"
+    if "tiktok.com" in u:                           return "tiktok"
+    if "youtube.com" in u or "youtu.be" in u:       return "youtube"
     return "other"
 
 def _platform_display(url: str) -> str:
@@ -61,17 +62,17 @@ def _platform_display(url: str) -> str:
 
 def _classify_error(msg: str) -> str:
     m = msg.lower()
-    if "private" in m:                           return "Private / Unavailable"
-    if "404" in m or "not found" in m:           return "Not Found (404)"
-    if "login" in m or "sign in" in m:           return "Login Required"
-    if "removed" in m or "deleted" in m:         return "Video Removed"
-    if "queryre" in m:                           return "Not Found (404)"
+    if "private" in m:                     return "Private / Unavailable"
+    if "404" in m or "not found" in m:     return "Not Found (404)"
+    if "login" in m or "sign in" in m:     return "Login Required"
+    if "removed" in m or "deleted" in m:   return "Video Removed"
+    if "queryre" in m:                     return "Not Found (404)"
     return f"Error: {msg[:80]}"
 
-# ── Platform fetchers (sync, run in executor) ──────────────────────────────────
+# ── Platform fetchers (sync, run in executor) ─────────────────────────────────
 
 def _fetch_instagram(url: str) -> dict:
-    # /p/, /reel/, /reels/, /tv/ 모두 처리
+    # /p/, /reel/, /reels/, /tv/ 모두 지원
     m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Instagram URL 파싱 실패")
@@ -83,18 +84,33 @@ def _fetch_instagram(url: str) -> dict:
         "shares":   None,
     }
 
-def _fetch_ytdlp(url: str) -> dict:
+def _fetch_tiktok(url: str) -> dict:
+    """TikWM API 경유 — 서버 IP 차단 우회."""
+    resp = _requests.get(
+        "https://www.tikwm.com/api/",
+        params={"url": url},
+        timeout=15,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("code") != 0:
+        raise ValueError(body.get("msg", "TikWM API 오류"))
+    d = body["data"]
+    return {
+        "views":    d.get("play_count"),
+        "likes":    d.get("digg_count"),
+        "comments": d.get("comment_count"),
+        "shares":   d.get("share_count"),
+    }
+
+def _fetch_youtube(url: str) -> dict:
+    """tv_embedded 클라이언트 — Login Required / format unavailable 우회."""
     opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        # ios 클라이언트 → YouTube Login Required 우회
-        "extractor_args": {"youtube": {"player_client": ["ios", "web"]}},
-        "http_headers": {
-            "User-Agent": (
-                "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)"
-            ),
-        },
+        "extractor_args": {"youtube": {"player_client": ["tv_embedded"]}},
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -102,7 +118,7 @@ def _fetch_ytdlp(url: str) -> dict:
         "views":    info.get("view_count"),
         "likes":    info.get("like_count"),
         "comments": info.get("comment_count"),
-        "shares":   info.get("repost_count"),   # TikTok only
+        "shares":   None,
     }
 
 # ── Async fetch ────────────────────────────────────────────────────────────────
@@ -121,10 +137,13 @@ async def _fetch_one(
             "comments": None, "shares": None, "saves": None,
         }
         try:
-            if _platform_key(url) == "instagram":
+            key = _platform_key(url)
+            if key == "instagram":
                 raw = await loop.run_in_executor(_executor, _fetch_instagram, url)
+            elif key == "tiktok":
+                raw = await loop.run_in_executor(_executor, _fetch_tiktok, url)
             else:
-                raw = await loop.run_in_executor(_executor, _fetch_ytdlp, url)
+                raw = await loop.run_in_executor(_executor, _fetch_youtube, url)
 
             base.update(raw)
             base["status"] = "Success"
@@ -161,7 +180,6 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
-    # Deduplicate while preserving order
     seen, unique = set(), []
     for u in req.urls:
         u = u.strip()
@@ -177,4 +195,4 @@ async def analyze(req: AnalyzeRequest):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": "1.0.0"}
+    return {"ok": True, "version": "1.1.0"}
