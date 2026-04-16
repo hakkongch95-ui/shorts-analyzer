@@ -177,13 +177,22 @@ tr:hover td{background:#ffffff06}
     <div class="ov-title">⚙ 설정 <button class="icon-btn" onclick="closeSettings()">✕</button></div>
 
     <div class="fg">
-      <label class="fl">백엔드 API URL <span style="color:var(--red)">*</span></label>
+      <label class="fl">YouTube Data API 키 <span style="color:var(--dim)">(선택 — 백엔드 없이 YouTube 처리)</span></label>
+      <input type="text" id="cfgYtKey" placeholder="AIzaSy...">
+      <div class="fh">
+        입력 시 백엔드 없이 YouTube URL 처리 가능. 무료, 하루 10,000회.
+        <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank">API 키 발급 →</a>
+      </div>
+    </div>
+
+    <div class="fg">
+      <label class="fl">백엔드 API URL <span style="color:var(--dim)">(선택 — TikTok·Instagram 처리)</span></label>
       <div class="row">
         <input type="url" id="cfgUrl" placeholder="https://shorts-analyzer-api.onrender.com" style="flex:1">
         <button class="btn btn-out btn-sm" onclick="testBackend()">연결 테스트</button>
       </div>
       <div class="fh">
-        Render.com에 백엔드를 배포한 후 URL을 입력하세요.
+        TikTok·Instagram 수집 시 필요. Render.com에 무료 배포 가능.
         <a href="https://github.com/hakkongch95-ui/shorts-analyzer#-backend-deploy" target="_blank">배포 가이드 →</a>
       </div>
     </div>
@@ -216,9 +225,9 @@ tr:hover td{background:#ffffff06}
 
   <!-- no-backend warning -->
   <div class="alert a-warn" id="noBackendAlert" style="display:none">
-    ⚠ 백엔드 URL이 설정되지 않았습니다.
-    <a href="#" onclick="showSettings();return false" style="color:var(--yellow);font-weight:600">⚙ 설정</a>에서 Render.com 배포 URL을 입력하세요.
-    <a href="https://github.com/hakkongch95-ui/shorts-analyzer#-backend-deploy" target="_blank" style="color:var(--yellow)">배포 방법 →</a>
+    ⚠ 설정이 필요합니다 —
+    <strong>YouTube</strong>는 <a href="#" onclick="showSettings();return false" style="color:var(--yellow);font-weight:600">⚙ 설정</a>에서 YouTube API 키를 입력하면 백엔드 없이 사용 가능합니다.
+    <strong>TikTok · Instagram</strong>은 백엔드 URL도 필요합니다.
   </div>
 
   <!-- ── Input card ── -->
@@ -349,16 +358,18 @@ tr:hover td{background:#ffffff06}
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
 const CFG = {
-  url:        localStorage.getItem('sa_url') || '',
+  url:        localStorage.getItem('sa_url')   || '',
+  ytKey:      localStorage.getItem('sa_ytkey') || '',
   delay:      parseFloat(localStorage.getItem('sa_delay') || '0.3'),
-  concurrent: parseInt(localStorage.getItem('sa_conc')  || '10'),
+  concurrent: parseInt(localStorage.getItem('sa_conc')   || '10'),
 };
 
 document.getElementById('cfgUrl').value        = CFG.url;
+document.getElementById('cfgYtKey').value      = CFG.ytKey;
 document.getElementById('cfgDelay').value      = CFG.delay;
 document.getElementById('cfgConcurrent').value = CFG.concurrent;
 
-if (!CFG.url) document.getElementById('noBackendAlert').style.display = 'flex';
+if (!CFG.url && !CFG.ytKey) document.getElementById('noBackendAlert').style.display = 'flex';
 
 function showSettings(){
   document.getElementById('testResult').style.display = 'none';
@@ -386,12 +397,15 @@ async function testBackend(){
 
 function saveSettings(){
   CFG.url        = document.getElementById('cfgUrl').value.trim().replace(/\/$/,'');
+  CFG.ytKey      = document.getElementById('cfgYtKey').value.trim();
   CFG.delay      = parseFloat(document.getElementById('cfgDelay').value)||0.3;
   CFG.concurrent = parseInt(document.getElementById('cfgConcurrent').value)||10;
   localStorage.setItem('sa_url',   CFG.url);
+  localStorage.setItem('sa_ytkey', CFG.ytKey);
   localStorage.setItem('sa_delay', CFG.delay);
   localStorage.setItem('sa_conc',  CFG.concurrent);
-  document.getElementById('noBackendAlert').style.display = CFG.url ? 'none' : 'flex';
+  document.getElementById('noBackendAlert').style.display =
+    (CFG.url || CFG.ytKey) ? 'none' : 'flex';
   closeSettings();
 }
 
@@ -460,9 +474,125 @@ let S = { results:[], ok:0, err:0, done:0, total:0, views:0, running:false };
 let sortKey = null, sortAsc = false;
 let abortCtrl = null;
 
+// ── Platform helpers ──────────────────────────────────────────────────────────
+function detectPlatform(url){
+  const u = url.toLowerCase();
+  if(u.includes('youtube.com')||u.includes('youtu.be')) return 'YouTube Shorts';
+  if(u.includes('tiktok.com'))    return 'TikTok';
+  if(u.includes('instagram.com')) return 'Instagram Reels';
+  return 'Unknown';
+}
+
+function isYouTube(url){ return /youtube\.com|youtu\.be/i.test(url); }
+
+function extractYouTubeId(url){
+  const m = url.match(/(?:shorts\/|watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+// ── YouTube Data API (client-side, no backend needed) ─────────────────────────
+async function fetchYouTubeBatch(videoIds){
+  const r = await fetch(
+    `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${videoIds.join(',')}&key=${CFG.ytKey}`
+  );
+  const d = await r.json();
+  if(d.error) throw new Error(d.error.message || 'YouTube API 오류 '+r.status);
+  const map = {};
+  for(const item of (d.items||[])){
+    const s = item.statistics||{};
+    map[item.id] = {
+      views:    parseInt(s.viewCount)    ||null,
+      likes:    parseInt(s.likeCount)    ||null,
+      comments: parseInt(s.commentCount) ||null,
+    };
+  }
+  return map;
+}
+
+async function runYouTubeDirect(ytUrls, allUrls){
+  // Build videoId → {url, idx} map
+  const idMap = {}, noId = [];
+  for(const url of ytUrls){
+    const vid = extractYouTubeId(url);
+    const idx = allUrls.indexOf(url)+1;
+    if(vid) idMap[vid] = {url, idx};
+    else    noId.push({url, idx});
+  }
+  // Immediately report parse failures
+  for(const {url, idx} of noId){
+    onResult({idx, total:S.total, url, platform:'YouTube Shorts',
+      views:null, likes:null, comments:null, shares:null, saves:null,
+      status:'Error: YouTube 동영상 ID 파싱 실패'});
+  }
+  // Batch 50 IDs per API call
+  const ids = Object.keys(idMap);
+  for(let i=0; i<ids.length; i+=50){
+    if(!S.running) break;
+    const batch = ids.slice(i, i+50);
+    try {
+      const statsMap = await fetchYouTubeBatch(batch);
+      for(const vid of batch){
+        const {url, idx} = idMap[vid];
+        const st = statsMap[vid];
+        onResult({idx, total:S.total, url, platform:'YouTube Shorts',
+          views:st?.views??null, likes:st?.likes??null, comments:st?.comments??null,
+          shares:null, saves:null,
+          status: st ? 'Success' : 'Not Found (404)'});
+      }
+    } catch(e){
+      for(const vid of batch){
+        const {url, idx} = idMap[vid];
+        onResult({idx, total:S.total, url, platform:'YouTube Shorts',
+          views:null, likes:null, comments:null, shares:null, saves:null,
+          status:'Error: '+e.message.slice(0,80)});
+      }
+    }
+  }
+}
+
+// ── Backend SSE stream ────────────────────────────────────────────────────────
+async function runBackend(backendUrls){
+  try {
+    const resp = await fetch(CFG.url+'/analyze', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({urls:backendUrls, delay:CFG.delay, concurrent:CFG.concurrent}),
+      signal: abortCtrl.signal,
+    });
+    if(!resp.ok) throw new Error('서버 오류 '+resp.status);
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for(const line of lines){
+        if(line.startsWith('data: ')){
+          try {
+            const d = JSON.parse(line.slice(6));
+            if(!d.done) onResult(d);
+          } catch{}
+        }
+      }
+    }
+  } catch(e){
+    if(e.name !== 'AbortError') alert('백엔드 오류: '+e.message);
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 async function run(){
-  if(!CFG.url){ showSettings(); return; }
+  const hasYt      = !!CFG.ytKey;
+  const hasBackend = !!CFG.url;
+
+  if(!hasYt && !hasBackend){
+    alert('⚙ 설정에서 YouTube API 키 또는 백엔드 URL을 입력하세요.');
+    showSettings(); return;
+  }
 
   const activeExcel = document.querySelector('.tab.on').textContent.includes('Excel');
   let urls;
@@ -473,11 +603,17 @@ async function run(){
   } else {
     urls = extractTextUrls();
   }
-
   if(!urls.length){ alert('분석할 URL이 없습니다.'); return; }
 
-  // Reset
-  S = { results:[], ok:0, err:0, done:0, total:urls.length, views:0, running:true };
+  // URL 분류
+  const ytUrls    = urls.filter(u => isYouTube(u));
+  const otherUrls = urls.filter(u => !isYouTube(u));
+
+  // 백엔드로 보낼 URL: API 키 있으면 YouTube는 직접 처리하므로 제외
+  const backendUrls = hasBackend ? (hasYt ? otherUrls : urls) : [];
+
+  // Reset state
+  S = {results:[], ok:0, err:0, done:0, total:urls.length, views:0, running:true};
   sortKey = null;
 
   document.getElementById('runBtn').disabled = true;
@@ -490,41 +626,22 @@ async function run(){
 
   abortCtrl = new AbortController();
 
-  try {
-    const resp = await fetch(CFG.url+'/analyze', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ urls, delay: CFG.delay, concurrent: CFG.concurrent }),
-      signal: abortCtrl.signal,
-    });
-
-    if(!resp.ok) throw new Error('서버 오류 '+resp.status);
-
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-
-    while(true){
-      const {done, value} = await reader.read();
-      if(done) break;
-      buf += dec.decode(value, {stream:true});
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for(const line of lines){
-        if(line.startsWith('data: ')){
-          try {
-            const d = JSON.parse(line.slice(6));
-            if(d.done){ finish(); return; }
-            onResult(d);
-          } catch{}
-        }
-      }
+  // 백엔드 없는데 TikTok/Instagram URL 있으면 즉시 "백엔드 필요" 표시
+  if(!hasBackend){
+    for(const url of otherUrls){
+      onResult({idx:urls.indexOf(url)+1, total:urls.length, url,
+        platform:detectPlatform(url),
+        views:null, likes:null, comments:null, shares:null, saves:null,
+        status:'백엔드 필요 — ⚙ 설정에서 Render.com URL 입력'});
     }
-    finish();
-  } catch(e){
-    if(e.name !== 'AbortError') alert('오류: '+e.message);
-    done2();
   }
+
+  const tasks = [];
+  if(hasYt      && ytUrls.length)      tasks.push(runYouTubeDirect(ytUrls, urls));
+  if(hasBackend && backendUrls.length)  tasks.push(runBackend(backendUrls));
+
+  await Promise.all(tasks);
+  finish();
 }
 
 function stop(){
