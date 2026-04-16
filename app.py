@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.8.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,13 +85,20 @@ def _platform_display(url: str) -> str:
         "other":     "Unknown",
     }[_platform_key(url)]
 
-def _classify_error(msg: str) -> str:
+def _classify_error(msg: str, platform: str = "") -> str:
     m = msg.lower()
-    if "private" in m:                               return "Private / Unavailable"
-    if "404" in m or "not found" in m:               return "Not Found (404)"
-    if "login" in m or "sign in" in m or "bot" in m: return "Login Required"
-    if "removed" in m or "deleted" in m:             return "Video Removed"
-    if "queryre" in m:                               return "Not Found (404)"
+    if "private" in m:                                   return "Private / Unavailable"
+    if "404" in m or "not found" in m:                   return "Not Found (404)"
+    if "429" in m or "too many" in m:
+        if platform == "instagram":
+            return "Instagram 요청 한도 초과 — 설정에서 Session ID 입력 필요"
+        return "Rate Limited (429)"
+    if "login" in m or "sign in" in m or "bot" in m:
+        if platform == "instagram":
+            return "Instagram 인증 필요 — ⚙ 설정에서 Session ID 입력"
+        return "Login Required"
+    if "removed" in m or "deleted" in m:                 return "Video Removed"
+    if "queryre" in m:                                   return "Not Found (404)"
     return f"Error: {msg[:80]}"
 
 def _extract_youtube_id(url: str) -> Optional[str]:
@@ -362,7 +369,7 @@ async def _fetch_one(
             base.update(raw)
             base["status"] = "Success"
         except Exception as e:
-            base["status"] = _classify_error(str(e))
+            base["status"] = _classify_error(str(e), key)
 
         if delay > 0:
             await asyncio.sleep(delay)
@@ -412,6 +419,6 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.8.0",
+        "version": "1.9.0",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
     }
