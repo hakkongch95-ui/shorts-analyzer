@@ -71,7 +71,8 @@ def _classify_error(msg: str) -> str:
 # ── Platform fetchers (sync, run in executor) ──────────────────────────────────
 
 def _fetch_instagram(url: str) -> dict:
-    m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
+    # /p/, /reel/, /reels/, /tv/ 모두 처리
+    m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Instagram URL 파싱 실패")
     post = instaloader.Post.from_shortcode(_instaloader.context, m.group(1))
@@ -83,7 +84,18 @@ def _fetch_instagram(url: str) -> dict:
     }
 
 def _fetch_ytdlp(url: str) -> dict:
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        # ios 클라이언트 → YouTube Login Required 우회
+        "extractor_args": {"youtube": {"player_client": ["ios", "web"]}},
+        "http_headers": {
+            "User-Agent": (
+                "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)"
+            ),
+        },
+    }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return {
