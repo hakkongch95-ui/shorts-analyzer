@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.5.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,7 +36,7 @@ app.add_middleware(
 
 # ── Shared instances ──────────────────────────────────────────────────────────
 
-def _make_instaloader() -> instaloader.Instaloader:
+def _make_instaloader(session_id: str = "") -> instaloader.Instaloader:
     L = instaloader.Instaloader(
         quiet=True,
         download_pictures=False,
@@ -46,14 +46,13 @@ def _make_instaloader() -> instaloader.Instaloader:
         download_comments=False,
         save_metadata=False,
     )
-    session_id = os.environ.get("INSTAGRAM_SESSION_ID", "").strip()
-    if session_id:
-        # 세션 쿠키로 인증 (로그인 불필요)
-        L.context._session.cookies.set("sessionid", session_id, domain=".instagram.com")
-        L.context._session.cookies.set("ds_user_id", "", domain=".instagram.com")
+    sid = session_id.strip() or os.environ.get("INSTAGRAM_SESSION_ID", "").strip()
+    if sid:
+        L.context._session.cookies.set("sessionid", sid, domain=".instagram.com")
+        L.context._session.cookies.set("ig_did",    "",  domain=".instagram.com")
     return L
 
-_instaloader = _make_instaloader()
+_instaloader = _make_instaloader()  # 기본 인스턴스 (env var 사용)
 _executor = ThreadPoolExecutor(max_workers=20)
 
 # TikTok: 1 req/s 제한
@@ -107,34 +106,45 @@ def _parse_int(s) -> Optional[int]:
 
 # ── Platform fetchers ─────────────────────────────────────────────────────────
 
-def _fetch_instagram(url: str) -> dict:
+def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Instagram URL 파싱 실패")
     shortcode = m.group(1)
 
-    # 1차: instaloader (세션 있으면 인증된 요청)
+    # 세션 제공 시 전용 instaloader 인스턴스 생성
+    il = _make_instaloader(insta_session) if insta_session else _instaloader
+
+    # 1차: instaloader (retry 최대 2회)
+    last_err = None
+    for attempt in range(2):
+        try:
+            if attempt > 0:
+                import time; time.sleep(3 * attempt)
+            post = instaloader.Post.from_shortcode(il.context, shortcode)
+            return {
+                "views":    post.video_view_count if post.is_video else None,
+                "likes":    post.likes,
+                "comments": post.comments,
+                "shares":   None,
+            }
+        except Exception as e:
+            last_err = e
+            continue
+
+    # 2차: yt-dlp fallback
     try:
-        post = instaloader.Post.from_shortcode(_instaloader.context, shortcode)
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
         return {
-            "views":    post.video_view_count if post.is_video else None,
-            "likes":    post.likes,
-            "comments": post.comments,
+            "views":    info.get("view_count"),
+            "likes":    info.get("like_count"),
+            "comments": info.get("comment_count"),
             "shares":   None,
         }
     except Exception:
-        pass
-
-    # 2차: yt-dlp fallback
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return {
-        "views":    info.get("view_count"),
-        "likes":    info.get("like_count"),
-        "comments": info.get("comment_count"),
-        "shares":   None,
-    }
+        raise last_err or ValueError("Instagram 수집 실패")
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
     resp = _requests.get(
@@ -234,6 +244,7 @@ async def _fetch_one(
     semaphore: asyncio.Semaphore,
     delay: float,
     yt_key: str,
+    insta_session: str,
 ) -> dict:
     async with semaphore:
         loop = asyncio.get_event_loop()
@@ -246,7 +257,9 @@ async def _fetch_one(
         try:
             key = _platform_key(url)
             if key == "instagram":
-                raw = await loop.run_in_executor(_executor, _fetch_instagram, url)
+                raw = await loop.run_in_executor(
+                    _executor, _fetch_instagram, url, insta_session
+                )
             elif key == "tiktok":
                 raw = await _fetch_tiktok_async(url, loop)
             elif key == "youtube":
@@ -266,11 +279,11 @@ async def _fetch_one(
 
 # ── SSE stream ─────────────────────────────────────────────────────────────────
 
-async def _stream(urls: list[str], delay: float, concurrent: int, yt_key: str):
+async def _stream(urls: list[str], delay: float, concurrent: int, yt_key: str, insta_session: str):
     semaphore = asyncio.Semaphore(concurrent)
     tasks = [
         asyncio.create_task(
-            _fetch_one(url, i + 1, len(urls), semaphore, delay, yt_key)
+            _fetch_one(url, i + 1, len(urls), semaphore, delay, yt_key, insta_session)
         )
         for i, url in enumerate(urls)
     ]
@@ -282,10 +295,11 @@ async def _stream(urls: list[str], delay: float, concurrent: int, yt_key: str):
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 class AnalyzeRequest(BaseModel):
-    urls:       list[str]
-    delay:      float = 0.3
-    concurrent: int   = 10
-    yt_key:     str   = ""
+    urls:          list[str]
+    delay:         float = 0.3
+    concurrent:    int   = 10
+    yt_key:        str   = ""
+    insta_session: str   = ""
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
@@ -297,7 +311,7 @@ async def analyze(req: AnalyzeRequest):
             unique.append(u)
 
     return StreamingResponse(
-        _stream(unique, req.delay, min(req.concurrent, 20), req.yt_key),
+        _stream(unique, req.delay, min(req.concurrent, 20), req.yt_key, req.insta_session),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -306,6 +320,6 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.5.0",
+        "version": "1.6.0",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
     }

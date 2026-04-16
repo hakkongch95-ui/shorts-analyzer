@@ -197,6 +197,15 @@ tr:hover td{background:#ffffff06}
       </div>
     </div>
 
+    <div class="fg">
+      <label class="fl">Instagram Session ID <span style="color:var(--dim)">(선택 — Instagram 인증)</span></label>
+      <input type="password" id="cfgInstaSession" placeholder="숫자로 시작하는 긴 문자열...">
+      <div class="fh">
+        입력 시 Instagram 수집 안정성 향상 (IP 차단 우회).
+        얻는 법: instagram.com 로그인 → F12 → Application → Cookies → .instagram.com → <strong>sessionid</strong> 값 복사
+      </div>
+    </div>
+
     <div class="row" style="gap:20px;flex-wrap:wrap">
       <div class="fg" style="flex:1;min-width:120px">
         <label class="fl">요청 지연 (초)</label>
@@ -358,16 +367,18 @@ tr:hover td{background:#ffffff06}
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
 const CFG = {
-  url:        localStorage.getItem('sa_url')   || '',
-  ytKey:      localStorage.getItem('sa_ytkey') || '',
-  delay:      parseFloat(localStorage.getItem('sa_delay') || '0.3'),
-  concurrent: parseInt(localStorage.getItem('sa_conc')   || '10'),
+  url:          localStorage.getItem('sa_url')          || '',
+  ytKey:        localStorage.getItem('sa_ytkey')        || '',
+  instaSession: localStorage.getItem('sa_insta_session') || '',
+  delay:        parseFloat(localStorage.getItem('sa_delay') || '0.3'),
+  concurrent:   parseInt(localStorage.getItem('sa_conc')   || '10'),
 };
 
-document.getElementById('cfgUrl').value        = CFG.url;
-document.getElementById('cfgYtKey').value      = CFG.ytKey;
-document.getElementById('cfgDelay').value      = CFG.delay;
-document.getElementById('cfgConcurrent').value = CFG.concurrent;
+document.getElementById('cfgUrl').value          = CFG.url;
+document.getElementById('cfgYtKey').value        = CFG.ytKey;
+document.getElementById('cfgInstaSession').value = CFG.instaSession;
+document.getElementById('cfgDelay').value        = CFG.delay;
+document.getElementById('cfgConcurrent').value   = CFG.concurrent;
 
 if (!CFG.url && !CFG.ytKey) document.getElementById('noBackendAlert').style.display = 'flex';
 
@@ -396,14 +407,16 @@ async function testBackend(){
 }
 
 function saveSettings(){
-  CFG.url        = document.getElementById('cfgUrl').value.trim().replace(/\/$/,'');
-  CFG.ytKey      = document.getElementById('cfgYtKey').value.trim();
-  CFG.delay      = parseFloat(document.getElementById('cfgDelay').value)||0.3;
-  CFG.concurrent = parseInt(document.getElementById('cfgConcurrent').value)||10;
-  localStorage.setItem('sa_url',   CFG.url);
-  localStorage.setItem('sa_ytkey', CFG.ytKey);
-  localStorage.setItem('sa_delay', CFG.delay);
-  localStorage.setItem('sa_conc',  CFG.concurrent);
+  CFG.url          = document.getElementById('cfgUrl').value.trim().replace(/\/$/,'');
+  CFG.ytKey        = document.getElementById('cfgYtKey').value.trim();
+  CFG.instaSession = document.getElementById('cfgInstaSession').value.trim();
+  CFG.delay        = parseFloat(document.getElementById('cfgDelay').value)||0.3;
+  CFG.concurrent   = parseInt(document.getElementById('cfgConcurrent').value)||10;
+  localStorage.setItem('sa_url',           CFG.url);
+  localStorage.setItem('sa_ytkey',         CFG.ytKey);
+  localStorage.setItem('sa_insta_session', CFG.instaSession);
+  localStorage.setItem('sa_delay',         CFG.delay);
+  localStorage.setItem('sa_conc',          CFG.concurrent);
   document.getElementById('noBackendAlert').style.display =
     (CFG.url || CFG.ytKey) ? 'none' : 'flex';
   closeSettings();
@@ -579,7 +592,7 @@ async function runBackend(backendUrls){
     const resp = await fetch(CFG.url+'/analyze', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({urls:backendUrls, delay:CFG.delay, concurrent:CFG.concurrent, yt_key:CFG.ytKey}),
+      body: JSON.stringify({urls:backendUrls, delay:CFG.delay, concurrent:CFG.concurrent, yt_key:CFG.ytKey, insta_session:CFG.instaSession}),
       signal: abortCtrl.signal,
     });
     if(!resp.ok) throw new Error('서버 오류 '+resp.status);
