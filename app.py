@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.7.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -244,6 +244,43 @@ def _fetch_youtube_html(url: str) -> dict:
         raise ValueError("viewCount parse failed")
     return {"views": views, "likes": likes, "comments": comments, "shares": None}
 
+def _fetch_youtube_innertube(video_id: str) -> dict:
+    """YouTube 내부 player API — 서버 IP 차단 없이 viewCount 반환."""
+    payload = {
+        "videoId": video_id,
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20240101.00.00",
+                "hl": "en",
+                "gl": "US",
+            }
+        },
+    }
+    resp = _requests.post(
+        "https://www.youtube.com/youtubei/v1/player"
+        "?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+        json=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    status = body.get("playabilityStatus", {}).get("status", "")
+    if status not in ("OK", ""):
+        raise ValueError(f"YouTube playability: {status}")
+    vd = body.get("videoDetails", {})
+    view_count = vd.get("viewCount")
+    return {
+        "views":    int(view_count) if view_count else None,
+        "likes":    None,   # innertube player에서 제공 안 됨
+        "comments": None,   # innertube player에서 제공 안 됨
+        "shares":   None,
+    }
+
 def _fetch_youtube_ytdlp(url: str) -> dict:
     opts = {
         "quiet": True,
@@ -262,12 +299,25 @@ def _fetch_youtube_ytdlp(url: str) -> dict:
 
 def _fetch_youtube(url: str, yt_key: str) -> dict:
     vid = _extract_youtube_id(url)
+
+    # 1순위: YouTube Data API v3 (key 있을 때) — 완전한 통계
     if yt_key and vid:
         return _fetch_youtube_api(vid, yt_key)
+
+    # 2순위: HTML 스크래핑
     try:
         return _fetch_youtube_html(url)
     except Exception:
         pass
+
+    # 3순위: innertube player (viewCount만, likes/comments 없음)
+    if vid:
+        try:
+            return _fetch_youtube_innertube(vid)
+        except Exception:
+            pass
+
+    # 4순위: yt-dlp fallback
     return _fetch_youtube_ytdlp(url)
 
 # ── Async fetch ────────────────────────────────────────────────────────────────
@@ -362,6 +412,6 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.7.0",
+        "version": "1.8.0",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
     }
