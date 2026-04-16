@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.6.0")
+app = FastAPI(title="Shorts Analyzer API", version="1.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -106,45 +106,87 @@ def _parse_int(s) -> Optional[int]:
 
 # ── Platform fetchers ─────────────────────────────────────────────────────────
 
+def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
+    """Instagram GraphQL 직접 호출 — instaloader 의존성 없이 view count 포함."""
+    cookies = {}
+    if session_id:
+        cookies["sessionid"] = session_id
+
+    r = _requests.get(
+        "https://www.instagram.com/graphql/query",
+        params={
+            "variables": json.dumps({"shortcode": shortcode}),
+            "doc_id": "8845758582119845",
+        },
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "x-ig-app-id": "936619743392459",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": f"https://www.instagram.com/p/{shortcode}/",
+        },
+        cookies=cookies,
+        timeout=15,
+    )
+    r.raise_for_status()
+    body = r.json()
+
+    media = (
+        body.get("data", {}).get("xdt_shortcode_media")
+        or body.get("data", {}).get("shortcode_media")
+    )
+    if not media:
+        raise ValueError("Instagram 응답에서 미디어 정보 없음")
+
+    views    = media.get("video_view_count")
+    likes    = (media.get("edge_media_preview_like") or {}).get("count")
+    comments = (media.get("edge_media_to_parent_comment") or
+                media.get("edge_media_to_comment") or {}).get("count")
+    return {
+        "views":    views,
+        "likes":    likes,
+        "comments": comments,
+        "shares":   None,
+    }
+
 def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     m = re.search(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Instagram URL 파싱 실패")
     shortcode = m.group(1)
 
-    # 세션 제공 시 전용 instaloader 인스턴스 생성
-    il = _make_instaloader(insta_session) if insta_session else _instaloader
-
-    # 1차: instaloader (retry 최대 2회)
-    last_err = None
-    for attempt in range(2):
-        try:
-            if attempt > 0:
-                import time; time.sleep(3 * attempt)
-            post = instaloader.Post.from_shortcode(il.context, shortcode)
-            return {
-                "views":    post.video_view_count if post.is_video else None,
-                "likes":    post.likes,
-                "comments": post.comments,
-                "shares":   None,
-            }
-        except Exception as e:
-            last_err = e
-            continue
-
-    # 2차: yt-dlp fallback
+    # 1차: GraphQL 직접 호출 (세션 있으면 인증, 없으면 비인증)
     try:
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        return _fetch_instagram_graphql(shortcode, insta_session)
+    except Exception:
+        pass
+
+    # 2차: instaloader
+    try:
+        il = _make_instaloader(insta_session) if insta_session else _instaloader
+        post = instaloader.Post.from_shortcode(il.context, shortcode)
         return {
-            "views":    info.get("view_count"),
-            "likes":    info.get("like_count"),
-            "comments": info.get("comment_count"),
+            "views":    post.video_view_count if post.is_video else None,
+            "likes":    post.likes,
+            "comments": post.comments,
             "shares":   None,
         }
     except Exception:
-        raise last_err or ValueError("Instagram 수집 실패")
+        pass
+
+    # 3차: yt-dlp fallback (views는 None일 수 있음)
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return {
+        "views":    info.get("view_count"),
+        "likes":    info.get("like_count"),
+        "comments": info.get("comment_count"),
+        "shares":   None,
+    }
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
     resp = _requests.get(
@@ -320,6 +362,6 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.6.0",
+        "version": "1.7.0",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
     }
