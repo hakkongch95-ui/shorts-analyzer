@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="2.1.1")
+app = FastAPI(title="Shorts Analyzer API", version="2.1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +57,7 @@ _executor = ThreadPoolExecutor(max_workers=20)
 
 # TikTok: 1 req/s 제한
 _tiktok_sem: Optional[asyncio.Semaphore] = None
+_instagram_sem: Optional[asyncio.Semaphore] = None
 
 _YT_HEADERS = {
     "User-Agent": (
@@ -356,15 +357,26 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
 
     import time as _time
 
-    # 1차: 세션 있으면 정식 GraphQL (가장 정확 — views 포함)
+    # 1차: 세션 있으면 정식 GraphQL — 최대 3회 재시도 + backoff
     if insta_session:
-        try:
-            return _fetch_instagram_graphql(shortcode, insta_session)
-        except Exception as e:
-            errors.append(f"graphql(auth):{e}")
+        for attempt in range(3):
+            try:
+                result = _fetch_instagram_graphql(shortcode, insta_session)
+                if result.get("views") is not None or result.get("likes") is not None:
+                    return result
+                # 데이터 비어있으면 짧게 대기 후 재시도
+                errors.append(f"graphql(auth:{attempt+1}):data empty")
+                _time.sleep(1.5)
+            except Exception as e:
+                err_str = str(e)
+                errors.append(f"graphql(auth:{attempt+1}):{err_str}")
+                # 429 rate limit → 더 오래 대기
+                wait = 4.0 if "429" in err_str or "too many" in err_str.lower() else 2.0
+                if attempt < 2:
+                    _time.sleep(wait * (attempt + 1))
 
-    # 2차: GraphQL 비인증 (views 포함, 로컬 IP에서 동작)
-    for attempt in range(3):
+    # 2차: GraphQL 비인증
+    for attempt in range(2):
         try:
             result = _fetch_instagram_graphql(shortcode, "")
             if result.get("views") is not None or result.get("likes") is not None:
@@ -373,8 +385,8 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
             break
         except Exception as e:
             errors.append(f"graphql({attempt+1}):{e}")
-            if attempt < 2:
-                _time.sleep(1.0 * (attempt + 1))
+            if attempt < 1:
+                _time.sleep(1.5)
 
     # 3차: Instagram embed 페이지
     embed_result = None
@@ -812,10 +824,14 @@ async def _fetch_one(
         try:
             key = _platform_key(url)
             if key == "instagram":
-                raw = await asyncio.wait_for(
-                    loop.run_in_executor(_executor, _fetch_instagram, url, insta_session),
-                    timeout=45,
-                )
+                global _instagram_sem
+                if _instagram_sem is None:
+                    _instagram_sem = asyncio.Semaphore(2)  # Instagram 동시 2개 제한
+                async with _instagram_sem:
+                    raw = await asyncio.wait_for(
+                        loop.run_in_executor(_executor, _fetch_instagram, url, insta_session),
+                        timeout=90,
+                    )
             elif key == "tiktok":
                 raw = await asyncio.wait_for(_fetch_tiktok_async(url, loop), timeout=60)
             elif key == "youtube":
@@ -920,7 +936,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "2.1.1",
+        "version": "2.1.2",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
         "platforms": ["youtube", "tiktok", "instagram", "x"],
         "x_test": _platform_key("https://x.com/test/status/123"),
