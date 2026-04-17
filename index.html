@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shorts Analyzer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3250;
+      --accent: #4f6ef7;
+      --accent2: #7c3aed;
+      --text: #e8eaf6;
+      --muted: #8892b0;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warn: #f59e0b;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    header {
+      background: linear-gradient(135deg, #1a1d27 0%, #16192a 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    header .logo { font-size: 26px; }
+    header h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+    header p { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .badge {
+      margin-left: auto;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 4px 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 14px; }
+
+    textarea {
+      width: 100%;
+      height: 160px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 13px;
+      padding: 12px;
+      resize: vertical;
+      outline: none;
+      transition: border-color .2s;
+    }
+    textarea:focus { border-color: var(--accent); }
+    textarea::placeholder { color: var(--muted); }
+
+    .options { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+    .opt-group { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 200px; }
+    .opt-group label { font-size: 12px; color: var(--muted); }
+    input[type="text"], input[type="number"] {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 8px 12px;
+      outline: none;
+      width: 100%;
+      transition: border-color .2s;
+    }
+    input:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--muted); }
+
+    .actions { display: flex; gap: 10px; margin-top: 16px; align-items: center; }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px 22px;
+      transition: opacity .15s, transform .1s;
+    }
+    button:active { transform: scale(.97); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+    }
+    .btn-secondary {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .btn-csv {
+      background: #14532d;
+      border: 1px solid #166534;
+      color: #86efac;
+    }
+
+    .progress-wrap { display: none; margin-top: 16px; }
+    .progress-bar-track {
+      height: 4px;
+      background: var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      border-radius: 4px;
+      transition: width .3s;
+    }
+    .progress-label { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+    .results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .stat-pills { display: flex; gap: 8px; flex-wrap: wrap; }
+    .pill {
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      border: 1px solid;
+    }
+    .pill-success { color: var(--success); border-color: #166534; background: #052e16; }
+    .pill-error { color: var(--error); border-color: #7f1d1d; background: #1f0707; }
+    .pill-total { color: var(--muted); border-color: var(--border); background: var(--surface2); }
+
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      padding: 10px 14px;
+      text-align: left;
+      background: var(--surface2);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+    td { padding: 10px 14px; vertical-align: middle; }
+    .td-url { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .td-url a { color: var(--accent); text-decoration: none; }
+    .td-url a:hover { text-decoration: underline; }
+    .td-platform { white-space: nowrap; }
+    .platform-badge {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+    .p-youtube { background: #1c1c1c; color: #ff4444; border: 1px solid #3d1010; }
+    .p-tiktok  { background: #0d1a1a; color: #69c9d0; border: 1px solid #0d3333; }
+    .p-instagram { background: #1a1020; color: #cd74e6; border: 1px solid #3d1560; }
+    .p-x { background: #111519; color: #8899aa; border: 1px solid #1e2d3d; }
+    .p-other { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+
+    .status-ok  { color: var(--success); }
+    .status-err { color: var(--error); font-size: 12px; }
+    .status-wait { color: var(--warn); font-size: 12px; }
+
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .dash { color: var(--muted); }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+    }
+    .empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+    .empty-state p { font-size: 14px; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+
+    @media (max-width: 600px) {
+      header { padding: 16px; }
+      main { padding: 16px; }
+      .badge { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">📊</span>
+  <div>
+    <h1>Shorts Analyzer</h1>
+    <p>YouTube · TikTok · Instagram · X(Twitter) 조회수 일괄 분석</p>
+  </div>
+  <span class="badge">v1.9.5</span>
+</header>
+
+<main>
+  <!-- Input -->
+  <div class="card">
+    <h2>URL 입력</h2>
+    <textarea id="urlInput" placeholder="분석할 URL을 한 줄에 하나씩 입력하세요.
+
+https://www.youtube.com/shorts/xxxxx
+https://www.tiktok.com/@user/video/xxxxx
+https://www.instagram.com/reel/xxxxx/
+https://x.com/user/status/xxxxx"></textarea>
+
+    <div class="options">
+      <div class="opt-group">
+        <label>Instagram Session ID (선택)</label>
+        <input type="text" id="sessionId" placeholder="로그인된 sessionid 쿠키값 (조회수 개선)" />
+      </div>
+      <div class="opt-group" style="max-width:120px">
+        <label>동시 요청 수</label>
+        <input type="number" id="concurrent" value="5" min="1" max="20" />
+      </div>
+      <div class="opt-group" style="max-width:120px">
+        <label>딜레이 (초)</label>
+        <input type="number" id="delay" value="0.3" min="0" max="5" step="0.1" />
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="analyzeBtn" onclick="startAnalysis()">분석 시작</button>
+      <button class="btn-secondary" id="stopBtn" onclick="stopAnalysis()" disabled>중단</button>
+      <button class="btn-csv" id="csvBtn" onclick="downloadCSV()" style="display:none">CSV 다운로드</button>
+    </div>
+
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+      </div>
+      <div class="progress-label" id="progressLabel">분석 중...</div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="card" id="resultsCard">
+    <div class="results-header">
+      <h2 style="margin:0">결과</h2>
+      <div class="stat-pills" id="statPills"></div>
+    </div>
+
+    <div id="emptyState" class="empty-state">
+      <div class="icon">🔍</div>
+      <p>URL을 입력하고 분석을 시작하세요</p>
+    </div>
+
+    <div class="table-wrap" id="tableWrap" style="display:none">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>플랫폼</th>
+            <th>URL</th>
+            <th>상태</th>
+            <th class="num">조회수</th>
+            <th class="num">좋아요</th>
+            <th class="num">댓글</th>
+            <th class="num">공유</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const API = 'https://shorts-analyzer-api-production.up.railway.app';
+let abortController = null;
+let allResults = [];
+let totalUrls = 0;
+
+function fmt(n) {
+  if (n == null || n === undefined) return '<span class="dash">—</span>';
+  return Number(n).toLocaleString('ko-KR');
+}
+
+function platformBadge(p) {
+  p = (p || '').toLowerCase();
+  if (p.includes('youtube'))   return `<span class="platform-badge p-youtube">YouTube</span>`;
+  if (p.includes('tiktok'))    return `<span class="platform-badge p-tiktok">TikTok</span>`;
+  if (p.includes('instagram')) return `<span class="platform-badge p-instagram">Instagram</span>`;
+  if (p.includes('twitter') || p.includes('x (')) return `<span class="platform-badge p-x">X</span>`;
+  return `<span class="platform-badge p-other">${p || '기타'}</span>`;
+}
+
+function statusCell(r) {
+  if (r._pending) return `<span class="status-wait"><span class="spinner"></span>분석 중</span>`;
+  if (r.status === 'Success') return `<span class="status-ok">✓ 성공</span>`;
+  return `<span class="status-err" title="${r.status}">✗ ${r.status}</span>`;
+}
+
+function renderRow(r, idx) {
+  const short = r.url.length > 50 ? r.url.slice(0, 50) + '…' : r.url;
+  return `<tr id="row-${idx}">
+    <td>${idx + 1}</td>
+    <td class="td-platform">${platformBadge(r.platform)}</td>
+    <td class="td-url"><a href="${r.url}" target="_blank" rel="noopener">${short}</a></td>
+    <td>${statusCell(r)}</td>
+    <td class="num">${r._pending ? '' : fmt(r.views)}</td>
+    <td class="num">${r._pending ? '' : fmt(r.likes)}</td>
+    <td class="num">${r._pending ? '' : fmt(r.comments)}</td>
+    <td class="num">${r._pending ? '' : fmt(r.shares)}</td>
+  </tr>`;
+}
+
+function updateRow(r) {
+  const row = document.getElementById(`row-${r.idx}`);
+  if (!row) return;
+  row.outerHTML = renderRow(r, r.idx);
+}
+
+function updateStats() {
+  const done = allResults.filter(r => !r._pending);
+  const ok = done.filter(r => r.status === 'Success').length;
+  const err = done.filter(r => r.status !== 'Success').length;
+  const pills = document.getElementById('statPills');
+  pills.innerHTML = `
+    <span class="pill pill-total">전체 ${totalUrls}</span>
+    <span class="pill pill-success">성공 ${ok}</span>
+    ${err > 0 ? `<span class="pill pill-error">실패 ${err}</span>` : ''}
+  `;
+
+  const pct = totalUrls > 0 ? Math.round(done.length / totalUrls * 100) : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressLabel').textContent =
+    `${done.length} / ${totalUrls} 완료 (${pct}%)`;
+}
+
+async function startAnalysis() {
+  const raw = document.getElementById('urlInput').value.trim();
+  if (!raw) { alert('URL을 입력하세요.'); return; }
+
+  const urls = raw.split('\n').map(s => s.trim()).filter(s => s.startsWith('http'));
+  if (!urls.length) { alert('유효한 URL이 없습니다. http로 시작하는 URL을 입력하세요.'); return; }
+
+  // reset
+  allResults = urls.map((url, i) => ({ url, idx: i, platform: '', status: '', _pending: true }));
+  totalUrls = urls.length;
+
+  const tbody = document.getElementById('resultsBody');
+  tbody.innerHTML = allResults.map((r, i) => renderRow(r, i)).join('');
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('tableWrap').style.display = 'block';
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('analyzeBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+  document.getElementById('csvBtn').style.display = 'none';
+  updateStats();
+
+  abortController = new AbortController();
+  const body = JSON.stringify({
+    urls,
+    delay: parseFloat(document.getElementById('delay').value) || 0.3,
+    concurrent: parseInt(document.getElementById('concurrent').value) || 5,
+    yt_key: '',
+    insta_session: document.getElementById('sessionId').value.trim(),
+  });
+
+  try {
+    const res = await fetch(`${API}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      signal: abortController.signal,
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        const obj = JSON.parse(payload);
+        if (obj.done) continue;
+        allResults[obj.idx] = { ...obj, _pending: false };
+        updateRow(allResults[obj.idx]);
+        updateStats();
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error(e);
+  }
+
+  document.getElementById('analyzeBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  document.getElementById('csvBtn').style.display = 'inline-block';
+  document.getElementById('progressLabel').textContent = '분석 완료';
+  updateStats();
+}
+
+function stopAnalysis() {
+  if (abortController) abortController.abort();
+  document.getElementById('analyzeBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  document.getElementById('progressLabel').textContent = '중단됨';
+}
+
+function downloadCSV() {
+  const header = ['#', 'URL', '플랫폼', '상태', '조회수', '좋아요', '댓글', '공유'];
+  const rows = allResults.filter(r => !r._pending).map((r, i) => [
+    r.idx + 1, r.url, r.platform, r.status,
+    r.views ?? '', r.likes ?? '', r.comments ?? '', r.shares ?? '',
+  ]);
+  const csv = [header, ...rows].map(r =>
+    r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')
+  ).join('\r\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'shorts_analysis.csv';
+  a.click();
+}
+</script>
+
+</body>
+</html>
