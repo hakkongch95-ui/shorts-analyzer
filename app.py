@@ -119,6 +119,16 @@ _IG_UA = (
     "Chrome/125.0.0.0 Safari/537.36"
 )
 
+_IG_EMBED_HEADERS = {
+    "User-Agent": _IG_UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "iframe",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "cross-site",
+    "Referer": "https://www.google.com/",
+}
+
 def _extract_instagram_shortcode(url: str) -> Optional[str]:
     """지원 형식: /p/, /reel/, /reels/, /tv/, /{user}/reel/, /share/..."""
     patterns = [
@@ -214,10 +224,10 @@ def _parse_ig_embed_html(html: str, shortcode: str) -> dict:
     return {"views": views, "likes": likes, "comments": None, "shares": None}
 
 def _fetch_instagram_embed(shortcode: str) -> dict:
-    """Instagram 공개 embed 페이지 — 직접 호출."""
+    """Instagram 공개 embed 페이지 — iframe 헤더로 SPA 쉘 방지."""
     r = _requests.get(
         f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
-        headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"},
+        headers=_IG_EMBED_HEADERS,
         timeout=15,
     )
     r.raise_for_status()
@@ -243,7 +253,7 @@ def _fetch_instagram_via_proxy(shortcode: str) -> dict:
         try:
             r = _requests.get(
                 tpl.format(target),
-                headers={"User-Agent": _IG_UA, "Accept": "text/html,*/*"},
+                headers=_IG_EMBED_HEADERS,
                 timeout=25,
             )
             if r.status_code != 200 or "EmbedSimple" not in r.text:
@@ -308,7 +318,20 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
         except Exception as e:
             errors.append(f"instaloader:{e}")
 
-    # 모든 경로 실패 → 원인을 메시지로 합성
+    # 모든 경로 실패 → 비공개 게시물인지 확인
+    try:
+        chk = _requests.get(
+            f"https://www.instagram.com/p/{shortcode}/",
+            headers={"User-Agent": _IG_UA},
+            timeout=10,
+        )
+        if 'og:description' not in chk.text and chk.status_code == 200:
+            raise RuntimeError("비공개 게시물 — 로그인 필요 (설정에서 Session ID 입력)")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
     raise RuntimeError(" | ".join(errors) or "Instagram fetch failed")
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
