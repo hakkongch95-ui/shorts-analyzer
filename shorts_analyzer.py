@@ -111,24 +111,19 @@ def process_excel(input_path: str, output_path: str = None,
     if output_path is None:
         output_path = str(p.parent / f"{p.stem}_result{p.suffix}")
 
-    wb = openpyxl.load_workbook(input_path)
+    wb = openpyxl.load_workbook(input_path, data_only=True)
     ws = wb.active
     max_row = ws.max_row
     max_col = ws.max_column
 
-    # ── 1단계: URL 열 위치 확인 (실제 데이터 있는 열만) ─────────────────────
+    # ── 1단계: URL 열 자동 감지 (모든 열 스캔) ──────────────────────────────
     active_url_cols = []
-    for col_idx in URL_COLUMNS:
-        if col_idx > max_col:
-            continue
-        has_url = False
-        for row in range(2, max_row + 1):
+    for col_idx in range(1, max_col + 1):
+        for row in range(1, max_row + 1):
             val = ws.cell(row=row, column=col_idx).value
             if val and str(val).strip().startswith("http"):
-                has_url = True
+                active_url_cols.append(col_idx)
                 break
-        if has_url:
-            active_url_cols.append(col_idx)
 
     print(f"활성 URL 열: {active_url_cols}")
     print(f"원본: {max_row}행 x {max_col}열")

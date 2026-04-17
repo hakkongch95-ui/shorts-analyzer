@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.9.5")
+app = FastAPI(title="Shorts Analyzer API", version="1.9.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -300,14 +300,21 @@ def _fetch_instagram_ytdlp(url: str, session_id: str = "") -> dict:
     }
 
 def _check_instagram_private(shortcode: str) -> bool:
-    """비공개 게시물인지 확인 (og:description 없으면 비공개/로그인 필요)."""
+    """비공개 게시물인지 확인. 로그인 리다이렉트(IP 차단)와 구별."""
     try:
         chk = _requests.get(
             f"https://www.instagram.com/p/{shortcode}/",
             headers={"User-Agent": _IG_UA},
             timeout=10,
+            allow_redirects=True,
         )
-        return chk.status_code == 200 and "og:description" not in chk.text
+        # 로그인 페이지로 리다이렉트 = IP 차단 (비공개 아님)
+        if "accounts/login" in chk.url or chk.status_code in (401, 403):
+            return False
+        # 명시적 비공개 신호
+        if '"is_private":true' in chk.text or '"loginRequired":true' in chk.text:
+            return True
+        return False
     except Exception:
         return False
 
@@ -322,6 +329,7 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
         raise ValueError("Instagram URL 파싱 실패")
 
     errors = []
+    ip_blocked = False  # Railway 등 서버 IP 차단 여부
 
     import time as _time
 
@@ -336,10 +344,8 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     for attempt in range(3):
         try:
             result = _fetch_instagram_graphql(shortcode, "")
-            # GraphQL 성공 + views/likes 중 하나라도 있으면 반환
             if result.get("views") is not None or result.get("likes") is not None:
                 return result
-            # 데이터가 없으면 embed로 계속 시도
             errors.append(f"graphql({attempt+1}):data empty")
             break
         except Exception as e:
@@ -347,12 +353,15 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
             if attempt < 2:
                 _time.sleep(1.0 * (attempt + 1))
 
-    # 3차: Instagram embed 페이지 — GraphQL이 비어있을 때 보완 (likes 확보)
+    # 3차: Instagram embed 페이지
     embed_result = None
     try:
         embed_result = _fetch_instagram_embed(shortcode)
     except Exception as e:
-        errors.append(f"embed:{e}")
+        err_str = str(e)
+        if "rate-limited" in err_str or "shell" in err_str:
+            ip_blocked = True
+        errors.append(f"embed:{err_str}")
 
     # embed + GraphQL 결과 병합 (GraphQL views + embed likes)
     if embed_result is not None:
@@ -396,11 +405,12 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
         except Exception as e:
             errors.append(f"instaloader:{e}")
 
-    # 모든 경로 실패 → 비공개 게시물인지 확인
+    # 모든 경로 실패 — 원인 판별
+    if ip_blocked:
+        raise RuntimeError("Instagram IP 차단됨 — Session ID를 입력하세요")
     if _check_instagram_private(shortcode):
-        raise RuntimeError("비공개 게시물 — 로그인 필요 (설정에서 Session ID 입력)")
-
-    raise RuntimeError("Instagram 조회 실패 — 설정에서 Session ID를 입력하면 해결됩니다")
+        raise RuntimeError("비공개 게시물 — Session ID가 필요합니다")
+    raise RuntimeError("Instagram 조회 실패 — Session ID를 입력하면 해결됩니다")
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
     resp = _requests.get(
@@ -666,7 +676,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.9.5",
+        "version": "1.9.6",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
         "platforms": ["youtube", "tiktok", "instagram", "x"],
         "x_test": _platform_key("https://x.com/test/status/123"),
