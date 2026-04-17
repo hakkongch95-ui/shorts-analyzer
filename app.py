@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="2.0.0")
+app = FastAPI(title="Shorts Analyzer API", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,6 +79,9 @@ def _platform_key(url: str) -> str:
     if "lipscosme.com" in u:                        return "lips"
     if "cosme.net" in u:                            return "atcosme"
     if "lemon8-app.com" in u:                       return "lemon8"
+    if "bsky.app" in u:                             return "bluesky"
+    if "threads.com" in u or "threads.net" in u:    return "threads"
+    if "note.com" in u:                             return "note"
     return "other"
 
 def _platform_display(url: str) -> str:
@@ -90,7 +93,10 @@ def _platform_display(url: str) -> str:
         "lips":      "LIPS",
         "atcosme":   "AtCosmé",
         "lemon8":    "Lemon8",
-        "other":     "Unknown",
+        "bluesky":   "Bluesky",
+        "threads":   "Threads",
+        "note":      "Note",
+        "other":     "기타 웹페이지",
     }[_platform_key(url)]
 
 def _classify_error(msg: str, platform: str = "") -> str:
@@ -512,11 +518,88 @@ def _fetch_lemon8(url: str) -> dict:
 
 
 def _resolve_tiktok_url(url: str) -> str:
-    """lite.tiktok.com 등 단축/리다이렉트 URL을 실제 video URL로 변환."""
-    if "lite.tiktok.com" in url or re.search(r"tiktok\.com/t/[A-Za-z0-9]+", url):
-        r = _requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, allow_redirects=True)
+    """vt.tiktok.com, lite.tiktok.com 등 단축 URL을 실제 video URL로 변환."""
+    if (
+        "vt.tiktok.com" in url
+        or "lite.tiktok.com" in url
+        or re.search(r"tiktok\.com/t/[A-Za-z0-9]+", url)
+    ):
+        r = _requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+            allow_redirects=True,
+        )
         return r.url
     return url
+
+
+def _fetch_bluesky(url: str) -> dict:
+    """Bluesky AT Protocol 공개 API로 post 지표 조회."""
+    m = re.search(r"/profile/([^/]+)/post/([A-Za-z0-9]+)", url)
+    if not m:
+        raise ValueError("Bluesky URL 파싱 실패")
+    handle, rkey = m.group(1), m.group(2)
+    api_url = (
+        f"https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread"
+        f"?uri=at://{handle}/app.bsky.feed.post/{rkey}"
+    )
+    r = _requests.get(api_url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=15)
+    r.raise_for_status()
+    post = r.json().get("thread", {}).get("post", {})
+    return {
+        "views":    None,
+        "likes":    post.get("likeCount"),
+        "comments": post.get("replyCount"),
+        "shares":   post.get("repostCount"),
+    }
+
+
+def _fetch_threads(url: str) -> dict:
+    """Threads — 공개 지표 없음 (JS 렌더링 필요). URL 유효성만 확인."""
+    r = _requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15, allow_redirects=True)
+    r.raise_for_status()
+    if len(r.text) < 1000:
+        raise ValueError("Threads 응답 비정상")
+    return {"views": None, "likes": None, "comments": None, "shares": None}
+
+
+def _fetch_note(url: str) -> dict:
+    """note.com 공개 API로 like_count 조회."""
+    m = re.search(r"/n/([A-Za-z0-9]+)", url)
+    if not m:
+        raise ValueError("note.com URL 파싱 실패")
+    note_key = m.group(1)
+    r = _requests.get(
+        f"https://note.com/api/v3/notes/{note_key}",
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", {})
+    return {
+        "views":    None,
+        "likes":    data.get("like_count"),
+        "comments": data.get("comment_count"),
+        "shares":   None,
+    }
+
+
+def _fetch_generic_url(url: str) -> dict:
+    """지원하지 않는 플랫폼 — HTTP 200 확인 후 Success (지표 없음)."""
+    import urllib.parse as _uparse
+    parsed = _uparse.urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("유효하지 않은 URL")
+    r = _requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+        allow_redirects=True,
+    )
+    if r.status_code >= 400:
+        raise ValueError(f"HTTP {r.status_code}")
+    return {"views": None, "likes": None, "comments": None, "shares": None}
 
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
@@ -753,8 +836,27 @@ async def _fetch_one(
                     loop.run_in_executor(_executor, _fetch_lemon8, url),
                     timeout=30,
                 )
+            elif key == "bluesky":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_bluesky, url),
+                    timeout=20,
+                )
+            elif key == "threads":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_threads, url),
+                    timeout=20,
+                )
+            elif key == "note":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_note, url),
+                    timeout=20,
+                )
             else:
-                raise ValueError("지원하지 않는 플랫폼")
+                # 기타 플랫폼 — URL 유효성 확인 후 Success (지표 없음)
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_generic_url, url),
+                    timeout=20,
+                )
 
             base.update(raw)
             base["status"] = "Success"
@@ -811,7 +913,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "2.0.0",
+        "version": "2.1.0",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
         "platforms": ["youtube", "tiktok", "instagram", "x"],
         "x_test": _platform_key("https://x.com/test/status/123"),
