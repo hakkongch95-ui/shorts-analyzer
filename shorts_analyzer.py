@@ -1,420 +1,306 @@
 #!/usr/bin/env python3
 """
-Shorts Analyzer
-Fetch engagement metrics (views, likes, comments, shares) for
-Instagram Reels, YouTube Shorts, and TikTok from an Excel file.
+Shorts Analyzer — Excel Batch Processor
+엑셀 파일의 모든 URL 열을 분석하여 각 URL 열 우측에 결과 열을 삽입합니다.
 
 Usage:
-    python shorts_analyzer.py input.xlsx
-    python shorts_analyzer.py input.xlsx --column 2 --output results.xlsx
-    python shorts_analyzer.py input.xlsx --cookies cookies.txt
+    python shorts_analyzer.py list_check.xlsx
+    python shorts_analyzer.py list_check.xlsx --api http://localhost:8000
+    python shorts_analyzer.py list_check.xlsx --session YOUR_SESSION_ID
 """
 
-import re
 import sys
+import json
 import time
 import argparse
+import urllib.request
+from copy import copy
 from pathlib import Path
-
-try:
-    import yt_dlp
-except ImportError:
-    print("Error: yt-dlp not installed. Run: pip install yt-dlp")
-    sys.exit(1)
 
 try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.utils import get_column_letter
 except ImportError:
     print("Error: openpyxl not installed. Run: pip install openpyxl")
     sys.exit(1)
 
-try:
-    import instaloader
-    _INSTALOADER = instaloader.Instaloader(
-        quiet=True,
-        download_pictures=False,
-        download_videos=False,
-        download_video_thumbnails=False,
-        download_geotags=False,
-        download_comments=False,
-        save_metadata=False,
+# ── Config ────────────────────────────────────────────────────────────────────
+
+DEFAULT_API = "https://shorts-analyzer-api-production.up.railway.app"
+METRIC_HEADERS = ["Views", "Likes", "Comments", "Shares"]
+
+# URL이 들어있는 열 번호 (1-indexed)
+URL_COLUMNS = [3, 5, 7, 9, 10]  # C, E, G, I, J
+
+# Style
+HEADER_FILL = PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid")
+HEADER_FONT = Font(bold=True, color="FFFFFF", size=10)
+SUCCESS_FILL = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+ERROR_FILL = PatternFill(start_color="FFEBEE", end_color="FFEBEE", fill_type="solid")
+CENTER = Alignment(horizontal="center", vertical="center")
+
+
+# ── API call ──────────────────────────────────────────────────────────────────
+
+def analyze_urls(urls: list[str], api_base: str, session_id: str = "",
+                 delay: float = 0.3, concurrent: int = 5) -> dict:
+    """
+    API에 URL 목록을 보내고 {url: result_dict} 매핑을 반환합니다.
+    result_dict: {views, likes, comments, shares, status}
+    """
+    if not urls:
+        return {}
+
+    body = json.dumps({
+        "urls": urls,
+        "delay": delay,
+        "concurrent": concurrent,
+        "yt_key": "",
+        "insta_session": session_id,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{api_base.rstrip('/')}/analyze",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    _INSTALOADER_AVAILABLE = True
-except ImportError:
-    _INSTALOADER_AVAILABLE = False
+
+    results = {}
+    with urllib.request.urlopen(req, timeout=600) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload:
+                continue
+            obj = json.loads(payload)
+            if obj.get("done"):
+                continue
+            results[obj["url"]] = obj
+
+    return results
 
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-
-METRIC_HEADERS = ["Platform", "Views", "Likes", "Comments", "Shares", "Saves", "Status"]
-DEFAULT_DELAY  = 1.5   # seconds between requests to avoid rate limiting
-
-# Header cell style
-HEADER_BG    = "1565C0"   # dark blue
-HEADER_FG    = "FFFFFF"   # white
-SUCCESS_BG   = "E8F5E9"   # light green
-ERROR_BG     = "FFEBEE"   # light red
-NA_BG        = "FFF9C4"   # light yellow
+def sanitize_value(val):
+    """음수값(-1 등)을 None으로 변환합니다."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and val < 0:
+        return None
+    return val
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Excel processing ──────────────────────────────────────────────────────────
 
-def detect_platform(url: str) -> str:
-    u = url.lower()
-    if "youtube.com/shorts" in u or "youtu.be" in u or "youtube.com/watch" in u:
-        return "YouTube Shorts"
-    if "tiktok.com" in u:
-        return "TikTok"
-    if "instagram.com" in u:
-        return "Instagram Reels"
-    return "Unknown"
-
-
-def fmt(n) -> str:
-    """Format a number with commas, or return 'N/A'."""
-    if n is None:
-        return "N/A"
-    return f"{n:,}"
+def _copy_cell_style(src, dst):
+    """셀 스타일을 복사합니다."""
+    if src.has_style:
+        dst.font = copy(src.font)
+        dst.fill = copy(src.fill)
+        dst.alignment = copy(src.alignment)
+        dst.border = copy(src.border)
+        dst.number_format = src.number_format
 
 
-# ── Core fetch ─────────────────────────────────────────────────────────────────
-
-def _extract_instagram_shortcode(url: str):
-    """Extract shortcode from /p/CODE/ or /reel/CODE/ Instagram URLs."""
-    m = re.search(r'/(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
-    return m.group(1) if m else None
-
-
-def fetch_instagram_metrics(url: str) -> dict:
-    """
-    Use instaloader to fetch Instagram Reels/post metrics.
-    Returns views (video_view_count), likes, and comments for public posts.
-    """
-    base = {
-        "platform": "Instagram Reels",
-        "views":    None,
-        "likes":    None,
-        "comments": None,
-        "shares":   None,
-        "saves":    None,
-        "status":   "Success",
-    }
-
-    if not _INSTALOADER_AVAILABLE:
-        base["status"] = "Error: instaloader not installed — run: pip install instaloader"
-        return base
-
-    shortcode = _extract_instagram_shortcode(url)
-    if not shortcode:
-        base["status"] = "Error: could not parse Instagram shortcode from URL"
-        return base
-
-    try:
-        post = instaloader.Post.from_shortcode(_INSTALOADER.context, shortcode)
-        base.update({
-            "views":    post.video_view_count if post.is_video else None,
-            "likes":    post.likes,
-            "comments": post.comments,
-        })
-        return base
-
-    except instaloader.exceptions.LoginRequiredException:
-        base["status"] = "Login Required — use --cookies"
-        return base
-    except instaloader.exceptions.ProfileNotExistsException:
-        base["status"] = "Not Found (404)"
-        return base
-    except Exception as e:
-        msg = str(e).lower()
-        if "private" in msg:
-            base["status"] = "Private / Unavailable"
-        elif "404" in msg or "not found" in msg:
-            base["status"] = "Not Found (404)"
-        else:
-            base["status"] = f"Error: {str(e)[:90]}"
-        return base
-
-
-def fetch_metrics(url: str, cookies_file: str = None) -> dict:
-    """
-    Route to the appropriate fetcher based on platform.
-
-    - Instagram  → instaloader  (supports video_view_count)
-    - YouTube    → yt-dlp
-    - TikTok     → yt-dlp
-    """
-    if "instagram.com" in url.lower():
-        return fetch_instagram_metrics(url)
-
-    opts = {
-        "quiet":         True,
-        "no_warnings":   True,
-        "skip_download": True,
-    }
-    if cookies_file:
-        opts["cookiefile"] = cookies_file
-
-    base = {
-        "platform": detect_platform(url),
-        "views":    None,
-        "likes":    None,
-        "comments": None,
-        "shares":   None,
-        "saves":    None,
-        "status":   "Success",
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        base.update({
-            "views":    info.get("view_count"),
-            "likes":    info.get("like_count"),
-            "comments": info.get("comment_count"),
-            "shares":   info.get("repost_count"),   # TikTok only
-        })
-        return base
-
-    except yt_dlp.utils.DownloadError as e:
-        msg = str(e).lower()
-        if "private" in msg:
-            status = "Private / Unavailable"
-        elif "404" in msg or "not found" in msg:
-            status = "Not Found (404)"
-        elif "login" in msg or "sign in" in msg or "age" in msg:
-            status = "Login Required — use --cookies"
-        elif "removed" in msg or "deleted" in msg:
-            status = "Video Removed"
-        else:
-            status = f"Error: {str(e)[:90]}"
-        base["status"] = status
-        return base
-
-    except Exception as e:
-        base["status"] = f"Error: {str(e)[:90]}"
-        return base
-
-
-# ── Excel I/O ──────────────────────────────────────────────────────────────────
-
-# Maps lowercase header names in the spreadsheet → metrics dict key
-HEADER_TO_METRIC = {
-    "views":    "views",
-    "view":     "views",
-    "likes":    "likes",
-    "like":     "likes",
-    "comments": "comments",
-    "comment":  "comments",
-    "shares":   "shares",
-    "share":    "shares",
-    "saves":    "saves",
-    "save":     "saves",
-}
-
-
-def _style_header_cell(cell, text: str):
-    cell.value = text
-    cell.font      = Font(bold=True, color=HEADER_FG)
-    cell.fill      = PatternFill(start_color=HEADER_BG, end_color=HEADER_BG, fill_type="solid")
-    cell.alignment = Alignment(horizontal="center", vertical="center")
-
-
-def _style_data_cell(cell, bg: str):
-    cell.fill      = PatternFill(start_color=bg, end_color=bg, fill_type="solid")
-    cell.alignment = Alignment(horizontal="center", vertical="center")
-
-
-def _find_existing_metric_columns(ws, header_row: int) -> dict:
-    """
-    Scan header_row and return {metric_key: col_index} for any column whose
-    header matches a known metric name (case-insensitive).
-    """
-    mapping = {}
-    for cell in ws[header_row]:
-        if cell.value and isinstance(cell.value, str):
-            key = HEADER_TO_METRIC.get(cell.value.strip().lower())
-            if key:
-                mapping[key] = cell.column
-    return mapping
-
-
-def process_excel(
-    input_path:   str,
-    url_column:   int   = 1,
-    output_path:  str   = None,
-    cookies_file: str   = None,
-    delay:        float = DEFAULT_DELAY,
-) -> str:
+def process_excel(input_path: str, output_path: str = None,
+                  api_base: str = DEFAULT_API, session_id: str = "",
+                  delay: float = 0.3, concurrent: int = 5):
     p = Path(input_path)
     if output_path is None:
-        output_path = str(p.parent / f"{p.stem}_analyzed{p.suffix}")
+        output_path = str(p.parent / f"{p.stem}_result{p.suffix}")
 
     wb = openpyxl.load_workbook(input_path)
     ws = wb.active
+    max_row = ws.max_row
+    max_col = ws.max_column
 
-    # ── detect header row ──────────────────────────────────────────────────────
-    first_val = ws.cell(row=1, column=url_column).value
-    has_header = bool(
-        first_val
-        and isinstance(first_val, str)
-        and not first_val.strip().startswith("http")
-    )
-    start_row  = 2 if has_header else 1
-    header_row = 1 if has_header else None
+    # ── 1단계: URL 열 위치 확인 (실제 데이터 있는 열만) ─────────────────────
+    active_url_cols = []
+    for col_idx in URL_COLUMNS:
+        if col_idx > max_col:
+            continue
+        has_url = False
+        for row in range(2, max_row + 1):
+            val = ws.cell(row=row, column=col_idx).value
+            if val and str(val).strip().startswith("http"):
+                has_url = True
+                break
+        if has_url:
+            active_url_cols.append(col_idx)
 
-    # ── detect existing metric columns vs. append mode ─────────────────────────
-    existing_cols = {}
-    if header_row:
-        existing_cols = _find_existing_metric_columns(ws, header_row)
+    print(f"활성 URL 열: {active_url_cols}")
+    print(f"원본: {max_row}행 x {max_col}열")
 
-    use_existing = bool(existing_cols)
-    metrics_start_col = url_column + 1  # fallback for append mode
+    # ── 2단계: 모든 URL 수집 (중복 제거) ────────────────────────────────────
+    url_set = set()
+    url_cell_map = []  # (row, orig_col, url)
 
-    if use_existing:
-        print(f"Detected existing metric columns: { {k: get_column_letter(v) for k,v in existing_cols.items()} }")
-    else:
-        # Write fresh metric headers
-        if header_row:
-            for i, h in enumerate(METRIC_HEADERS):
-                _style_header_cell(
-                    ws.cell(row=header_row, column=metrics_start_col + i), h
-                )
+    for col_idx in active_url_cols:
+        for row in range(2, max_row + 1):
+            val = ws.cell(row=row, column=col_idx).value
+            if val and str(val).strip().startswith("http"):
+                url = str(val).strip()
+                url_set.add(url)
+                url_cell_map.append((row, col_idx, url))
 
-    # ── collect valid URLs ─────────────────────────────────────────────────────
-    rows_to_process = []
-    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row):
-        cell = row[url_column - 1]
-        val  = cell.value
-        if val and isinstance(val, str) and val.strip().startswith("http"):
-            rows_to_process.append((cell.row, val.strip()))
+    unique_urls = list(url_set)
+    print(f"분석 대상 URL: {len(unique_urls)}개 (고유), 총 셀: {len(url_cell_map)}개")
 
-    total = len(rows_to_process)
-    if total == 0:
-        print("No valid URLs found in the specified column.")
-        return output_path
+    # ── 3단계: API 호출 (배치) ──────────────────────────────────────────────
+    print(f"\nAPI 호출 중 ({api_base})...")
+    batch_size = 50
+    all_results = {}
 
-    print(f"Found {total} URL(s) to process.\n")
-    ok_count  = 0
-    err_count = 0
+    for i in range(0, len(unique_urls), batch_size):
+        batch = unique_urls[i:i + batch_size]
+        print(f"  배치 {i // batch_size + 1}: {len(batch)}개 URL 처리 중...")
+        try:
+            batch_results = analyze_urls(batch, api_base, session_id, delay, concurrent)
+            all_results.update(batch_results)
+        except Exception as e:
+            print(f"  ⚠ 배치 실패: {e}")
+        if i + batch_size < len(unique_urls):
+            time.sleep(1)
 
-    for idx, (row_num, url) in enumerate(rows_to_process, 1):
-        print(f"[{idx:>3}/{total}]  {url[:72]}")
-        metrics = fetch_metrics(url, cookies_file)
+    ok = sum(1 for r in all_results.values() if r.get("status") == "Success")
+    print(f"분석 완료: {ok}/{len(unique_urls)} 성공\n")
 
-        success = metrics["status"] == "Success"
-        bg = SUCCESS_BG if success else ERROR_BG
+    # ── 4단계: 새 열 구조 매핑 ──────────────────────────────────────────────
+    # 원본 열 → 새 열 매핑 (URL 열 뒤에 4개 메트릭 열 삽입)
+    # 오른쪽부터 처리해서 왼쪽 열 번호가 변하지 않도록 함
+    sorted_url_cols = sorted(active_url_cols)
 
-        if use_existing:
-            # Write into pre-existing named columns
-            for metric_key, col_idx in existing_cols.items():
-                val = metrics.get(metric_key)
-                c = ws.cell(row=row_num, column=col_idx)
-                c.value = val
-                cell_bg = NA_BG if metric_key == "saves" else bg
-                _style_data_cell(c, cell_bg)
+    # orig_col → new_col 매핑 테이블 구성
+    col_mapping = {}  # orig_col → new_col
+    metric_insert_points = {}  # orig_url_col → new_col (첫 메트릭 열 위치)
+
+    new_col = 1
+    for orig in range(1, max_col + 1):
+        col_mapping[orig] = new_col
+        new_col += 1
+        if orig in sorted_url_cols:
+            metric_insert_points[orig] = new_col
+            new_col += len(METRIC_HEADERS)  # 4칸 건너뜀
+
+    new_max_col = new_col - 1
+    print(f"결과: {max_row}행 x {new_max_col}열 (메트릭 {len(active_url_cols) * len(METRIC_HEADERS)}열 추가)")
+
+    # ── 5단계: 새 워크북 생성 ───────────────────────────────────────────────
+    wb_out = openpyxl.Workbook()
+    ws_out = wb_out.active
+    ws_out.title = ws.title
+
+    # 헤더 행 복사 + 메트릭 헤더 삽입
+    for orig_col in range(1, max_col + 1):
+        src = ws.cell(row=1, column=orig_col)
+        dst = ws_out.cell(row=1, column=col_mapping[orig_col])
+        dst.value = src.value
+        _copy_cell_style(src, dst)
+
+    for url_col, insert_col in metric_insert_points.items():
+        # URL 열 헤더에서 플랫폼명 추출
+        url_header = str(ws.cell(row=1, column=url_col).value or "")
+        platform = ""
+        if "tiktok" in url_header.lower():
+            platform = "TT_"
+        elif "youtube" in url_header.lower():
+            platform = "YT_"
+        elif "instagram" in url_header.lower():
+            platform = "IG_"
+        elif "twitter" in url_header.lower() or "x(" in url_header.lower():
+            platform = "X_"
         else:
-            # Append mode: write all metrics right after URL column
-            values = [
-                metrics["platform"],
-                metrics["views"],
-                metrics["likes"],
-                metrics["comments"],
-                metrics["shares"],
-                metrics["saves"],
-                metrics["status"],
-            ]
-            for col_offset, val in enumerate(values):
-                c = ws.cell(row=row_num, column=metrics_start_col + col_offset)
-                c.value = val
-                cell_bg = NA_BG if col_offset == 5 else bg
-                _style_data_cell(c, cell_bg)
+            platform = "Other_"
 
-        if success:
-            ok_count += 1
-            print(
-                f"         OK  Views:{fmt(metrics['views']):>12}  "
-                f"Likes:{fmt(metrics['likes']):>12}  "
-                f"Comments:{fmt(metrics['comments']):>10}  "
-                f"Shares:{fmt(metrics['shares']):>10}"
-            )
-        else:
-            err_count += 1
-            print(f"         NG  {metrics['status']}")
+        for i, header in enumerate(METRIC_HEADERS):
+            cell = ws_out.cell(row=1, column=insert_col + i)
+            cell.value = f"{platform}{header}"
+            cell.font = HEADER_FONT
+            cell.fill = HEADER_FILL
+            cell.alignment = CENTER
 
-        if idx < total:
-            time.sleep(delay)
+    # 데이터 행 복사 + 메트릭 값 채우기
+    for row in range(2, max_row + 1):
+        # 원본 데이터 복사
+        for orig_col in range(1, max_col + 1):
+            src = ws.cell(row=row, column=orig_col)
+            dst = ws_out.cell(row=row, column=col_mapping[orig_col])
+            dst.value = src.value
+            _copy_cell_style(src, dst)
 
-    # ── auto-width ─────────────────────────────────────────────────────────────
-    if not use_existing:
-        for col_offset, header in enumerate(METRIC_HEADERS):
-            col_letter = get_column_letter(metrics_start_col + col_offset)
-            ws.column_dimensions[col_letter].width = max(14, len(header) + 6)
+        # 각 URL 열의 메트릭 값 채우기
+        for url_col, insert_col in metric_insert_points.items():
+            val = ws.cell(row=row, column=url_col).value
+            url = str(val).strip() if val else ""
 
-    wb.save(output_path)
+            if url.startswith("http") and url in all_results:
+                result = all_results[url]
+                is_success = result.get("status") == "Success"
+                fill = SUCCESS_FILL if is_success else ERROR_FILL
 
-    print(f"\n{'─' * 65}")
-    print(f"  Done!  {ok_count} success  |  {err_count} error(s)  |  total {total}")
-    print(f"  Saved → {output_path}")
-    print(f"{'─' * 65}")
+                metrics = [
+                    sanitize_value(result.get("views")),
+                    sanitize_value(result.get("likes")),
+                    sanitize_value(result.get("comments")),
+                    sanitize_value(result.get("shares")),
+                ]
 
+                for i, metric_val in enumerate(metrics):
+                    cell = ws_out.cell(row=row, column=insert_col + i)
+                    if is_success:
+                        cell.value = metric_val
+                    else:
+                        # 에러 시 첫 열에만 상태 메시지 표시
+                        cell.value = result.get("status", "") if i == 0 else None
+                    cell.fill = fill
+                    cell.alignment = CENTER
+
+    # ── 6단계: 열 너비 조정 ─────────────────────────────────────────────────
+    for url_col, insert_col in metric_insert_points.items():
+        for i in range(len(METRIC_HEADERS)):
+            col_letter = openpyxl.utils.get_column_letter(insert_col + i)
+            ws_out.column_dimensions[col_letter].width = 14
+
+    # 원본 열 너비 복사
+    for orig_col in range(1, max_col + 1):
+        orig_letter = openpyxl.utils.get_column_letter(orig_col)
+        new_letter = openpyxl.utils.get_column_letter(col_mapping[orig_col])
+        if ws.column_dimensions[orig_letter].width:
+            ws_out.column_dimensions[new_letter].width = ws.column_dimensions[orig_letter].width
+
+    wb_out.save(output_path)
+    print(f"저장 완료: {output_path}")
     return output_path
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Shorts Analyzer — fetch engagement metrics for short-form videos",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-examples:
-  python shorts_analyzer.py urls.xlsx
-  python shorts_analyzer.py urls.xlsx --column 2
-  python shorts_analyzer.py urls.xlsx --output results.xlsx
-  python shorts_analyzer.py urls.xlsx --cookies cookies.txt --delay 2
-
-notes:
-  • Supported platforms : YouTube Shorts, TikTok, Instagram Reels
-  • Available metrics   : Views, Likes, Comments, Shares (TikTok only)
-  • 'Saves' is never publicly accessible on any platform (shown as N/A)
-  • For Instagram login-required content, export cookies via a browser
-    extension (e.g. 'Get cookies.txt LOCALLY') and pass with --cookies
-""",
+        description="Shorts Analyzer — 엑셀 파일의 모든 URL 열을 분석",
     )
-    parser.add_argument("input",
-        help="Excel file (.xlsx) containing video URLs")
-    parser.add_argument("-c", "--column", type=int, default=1,
-        metavar="N",
-        help="column number that contains URLs — 1 = column A (default: 1)")
-    parser.add_argument("-o", "--output", default=None,
-        metavar="FILE",
-        help="output file path (default: <input>_analyzed.xlsx)")
-    parser.add_argument("--cookies", default=None,
-        metavar="FILE",
-        help="Netscape-format cookies.txt for age-restricted / login-required content")
-    parser.add_argument("--delay", type=float, default=DEFAULT_DELAY,
-        metavar="SEC",
-        help=f"seconds to wait between requests (default: {DEFAULT_DELAY})")
+    parser.add_argument("input", help="입력 엑셀 파일 (.xlsx)")
+    parser.add_argument("-o", "--output", default=None, help="출력 파일 경로")
+    parser.add_argument("--api", default=DEFAULT_API, help=f"API 주소 (기본: {DEFAULT_API})")
+    parser.add_argument("--session", default="", help="Instagram Session ID")
+    parser.add_argument("--delay", type=float, default=0.3, help="요청 간 딜레이 (초)")
+    parser.add_argument("--concurrent", type=int, default=5, help="동시 요청 수")
 
     args = parser.parse_args()
 
     if not Path(args.input).exists():
-        print(f"Error: file not found — {args.input}")
-        sys.exit(1)
-
-    if not args.input.lower().endswith((".xlsx", ".xls")):
-        print("Error: input must be an Excel file (.xlsx or .xls)")
+        print(f"Error: 파일 없음 — {args.input}")
         sys.exit(1)
 
     process_excel(
-        input_path   = args.input,
-        url_column   = args.column,
-        output_path  = args.output,
-        cookies_file = args.cookies,
-        delay        = args.delay,
+        input_path=args.input,
+        output_path=args.output,
+        api_base=args.api,
+        session_id=args.session,
+        delay=args.delay,
+        concurrent=args.concurrent,
     )
 
 

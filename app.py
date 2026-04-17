@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.9.4")
+app = FastAPI(title="Shorts Analyzer API", version="1.9.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,6 +75,7 @@ def _platform_key(url: str) -> str:
     if "instagram.com" in u:                   return "instagram"
     if "tiktok.com" in u:                      return "tiktok"
     if "youtube.com" in u or "youtu.be" in u:  return "youtube"
+    if "x.com" in u or "twitter.com" in u:     return "x"
     return "other"
 
 def _platform_display(url: str) -> str:
@@ -82,6 +83,7 @@ def _platform_display(url: str) -> str:
         "instagram": "Instagram Reels",
         "tiktok":    "TikTok",
         "youtube":   "YouTube Shorts",
+        "x":         "X (Twitter)",
         "other":     "Unknown",
     }[_platform_key(url)]
 
@@ -185,7 +187,8 @@ def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
     if not media:
         raise ValueError("Instagram 응답에서 미디어 정보 없음")
 
-    views    = media.get("video_view_count") or media.get("video_play_count")
+    # video_play_count = Instagram 표시 재생수, video_view_count = 3초 이상 조회수
+    views    = media.get("video_play_count") or media.get("video_view_count")
     likes    = (media.get("edge_media_preview_like") or {}).get("count")
     comments = (media.get("edge_media_to_parent_comment") or
                 media.get("edge_media_to_comment") or {}).get("count")
@@ -193,11 +196,13 @@ def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
         likes = None
     if comments is not None and comments < 0:
         comments = None
+    is_video = media.get("is_video", False)
     return {
         "views":    views,
         "likes":    likes,
         "comments": comments,
         "shares":   None,
+        "is_video": is_video,
     }
 
 def _parse_ig_embed_html(html: str, shortcode: str) -> dict:
@@ -318,28 +323,52 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
 
     errors = []
 
-    # 1차: 세션 있으면 정식 GraphQL (가장 정확)
+    import time as _time
+
+    # 1차: 세션 있으면 정식 GraphQL (가장 정확 — views 포함)
     if insta_session:
         try:
             return _fetch_instagram_graphql(shortcode, insta_session)
         except Exception as e:
             errors.append(f"graphql(auth):{e}")
 
-    # 2차: Instagram embed 페이지 직접 — 로컬/residential IP에서 동작
-    try:
-        return _fetch_instagram_embed(shortcode)
-    except Exception as e:
-        errors.append(f"embed:{e}")
-
-    # 3차: GraphQL 비인증 (재시도 포함)
-    import time as _time
+    # 2차: GraphQL 비인증 (views 포함, 로컬 IP에서 동작)
     for attempt in range(3):
         try:
-            return _fetch_instagram_graphql(shortcode, "")
+            result = _fetch_instagram_graphql(shortcode, "")
+            # GraphQL 성공 + views/likes 중 하나라도 있으면 반환
+            if result.get("views") is not None or result.get("likes") is not None:
+                return result
+            # 데이터가 없으면 embed로 계속 시도
+            errors.append(f"graphql({attempt+1}):data empty")
+            break
         except Exception as e:
             errors.append(f"graphql({attempt+1}):{e}")
             if attempt < 2:
-                _time.sleep(1.5 * (attempt + 1))
+                _time.sleep(1.0 * (attempt + 1))
+
+    # 3차: Instagram embed 페이지 — GraphQL이 비어있을 때 보완 (likes 확보)
+    embed_result = None
+    try:
+        embed_result = _fetch_instagram_embed(shortcode)
+    except Exception as e:
+        errors.append(f"embed:{e}")
+
+    # embed + GraphQL 결과 병합 (GraphQL views + embed likes)
+    if embed_result is not None:
+        gql_views = None
+        for attempt in range(2):
+            try:
+                gql = _fetch_instagram_graphql(shortcode, "")
+                if gql.get("views") is not None:
+                    gql_views = gql["views"]
+                    break
+            except Exception:
+                if attempt < 1:
+                    _time.sleep(1.0)
+        if gql_views is not None:
+            embed_result["views"] = gql_views
+        return embed_result
 
     # 4차: 공용 프록시 경유
     try:
@@ -391,6 +420,35 @@ def _fetch_tiktok_tikwm(url: str) -> dict:
         "comments": d.get("comment_count"),
         "shares":   d.get("share_count"),
     }
+
+def _extract_tweet_id(url: str) -> Optional[str]:
+    m = re.search(r"/status/(\d+)", url)
+    return m.group(1) if m else None
+
+def _fetch_x_fxtwitter(tweet_id: str) -> dict:
+    """FxTwitter API로 X(Twitter) 트윗 메트릭 조회."""
+    resp = _requests.get(
+        f"https://api.fxtwitter.com/status/{tweet_id}",
+        timeout=15,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    tweet = body.get("tweet")
+    if not tweet:
+        raise ValueError("트윗 정보 없음")
+    return {
+        "views":    tweet.get("views"),
+        "likes":    tweet.get("likes"),
+        "comments": tweet.get("replies"),
+        "shares":   tweet.get("retweets"),
+    }
+
+def _fetch_x(url: str) -> dict:
+    tweet_id = _extract_tweet_id(url)
+    if not tweet_id:
+        raise ValueError("X(Twitter) URL에서 트윗 ID를 추출할 수 없습니다")
+    return _fetch_x_fxtwitter(tweet_id)
 
 def _fetch_youtube_api(video_id: str, yt_key: str) -> dict:
     resp = _requests.get(
@@ -545,6 +603,11 @@ async def _fetch_one(
                     loop.run_in_executor(_executor, _fetch_youtube, url, yt_key),
                     timeout=60,
                 )
+            elif key == "x":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_x, url),
+                    timeout=30,
+                )
             else:
                 raise ValueError("지원하지 않는 플랫폼")
 
@@ -603,7 +666,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.9.3",
+        "version": "1.9.5",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
     }
 
