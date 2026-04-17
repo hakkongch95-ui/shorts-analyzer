@@ -267,6 +267,45 @@ def _fetch_instagram_via_proxy(shortcode: str) -> dict:
             last_err = f"{tpl.split('/')[2]}: {e}"
     raise ValueError(f"proxy 모두 실패 ({last_err})")
 
+def _fetch_instagram_ytdlp(url: str, session_id: str = "") -> dict:
+    """yt-dlp fallback — 세션 쿠키 지원."""
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    if session_id:
+        import tempfile, http.cookiejar
+        jar = http.cookiejar.MozillaCookieJar()
+        c = http.cookiejar.Cookie(
+            version=0, name="sessionid", value=session_id,
+            port=None, port_specified=False,
+            domain=".instagram.com", domain_specified=True, domain_initial_dot=True,
+            path="/", path_specified=True, secure=True, expires=0,
+            discard=True, comment=None, comment_url=None, rest={}, rfc2109=False,
+        )
+        jar.set_cookie(c)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="w")
+        jar.save(tmp.name)
+        tmp.close()
+        opts["cookiefile"] = tmp.name
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return {
+        "views":    info.get("view_count"),
+        "likes":    info.get("like_count"),
+        "comments": info.get("comment_count"),
+        "shares":   None,
+    }
+
+def _check_instagram_private(shortcode: str) -> bool:
+    """비공개 게시물인지 확인 (og:description 없으면 비공개/로그인 필요)."""
+    try:
+        chk = _requests.get(
+            f"https://www.instagram.com/p/{shortcode}/",
+            headers={"User-Agent": _IG_UA},
+            timeout=10,
+        )
+        return chk.status_code == 200 and "og:description" not in chk.text
+    except Exception:
+        return False
+
 def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     if "/share/" in url.lower():
         url = _resolve_instagram_share(url)
@@ -292,19 +331,29 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     except Exception as e:
         errors.append(f"embed:{e}")
 
-    # 3차: 공용 프록시 경유 — Railway 같은 flagged IP 대응
+    # 3차: GraphQL 비인증 (재시도 포함)
+    import time as _time
+    for attempt in range(3):
+        try:
+            return _fetch_instagram_graphql(shortcode, "")
+        except Exception as e:
+            errors.append(f"graphql({attempt+1}):{e}")
+            if attempt < 2:
+                _time.sleep(1.5 * (attempt + 1))
+
+    # 4차: 공용 프록시 경유
     try:
         return _fetch_instagram_via_proxy(shortcode)
     except Exception as e:
         errors.append(f"proxy:{e}")
 
-    # 4차: 세션 없는 GraphQL (최후; 대부분 401)
+    # 5차: yt-dlp (세션 있으면 쿠키 전달)
     try:
-        return _fetch_instagram_graphql(shortcode, "")
+        return _fetch_instagram_ytdlp(url, insta_session)
     except Exception as e:
-        errors.append(f"graphql:{e}")
+        errors.append(f"ytdlp:{e}")
 
-    # 5차: 세션 있을 때만 instaloader 사용 (retry 60s sleep 때문에 비세션에서는 생략)
+    # 6차: 세션 있을 때만 instaloader 사용
     if insta_session:
         try:
             il = _make_instaloader(insta_session)
@@ -319,20 +368,10 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
             errors.append(f"instaloader:{e}")
 
     # 모든 경로 실패 → 비공개 게시물인지 확인
-    try:
-        chk = _requests.get(
-            f"https://www.instagram.com/p/{shortcode}/",
-            headers={"User-Agent": _IG_UA},
-            timeout=10,
-        )
-        if 'og:description' not in chk.text and chk.status_code == 200:
-            raise RuntimeError("비공개 게시물 — 로그인 필요 (설정에서 Session ID 입력)")
-    except RuntimeError:
-        raise
-    except Exception:
-        pass
+    if _check_instagram_private(shortcode):
+        raise RuntimeError("비공개 게시물 — 로그인 필요 (설정에서 Session ID 입력)")
 
-    raise RuntimeError(" | ".join(errors) or "Instagram fetch failed")
+    raise RuntimeError("Instagram 조회 실패 — 설정에서 Session ID를 입력하면 해결됩니다")
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
     resp = _requests.get(
