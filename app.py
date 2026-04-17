@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.9.3")
+app = FastAPI(title="Shorts Analyzer API", version="1.9.4")
 
 app.add_middleware(
     CORSMiddleware,
