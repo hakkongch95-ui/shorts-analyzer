@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="2.1.0")
+app = FastAPI(title="Shorts Analyzer API", version="2.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -343,6 +343,13 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
         if re.match(r"https?://(?:www\.)?instagram\.com/[^/]+/?(?:\?.*)?$", url):
             raise ValueError("Instagram 프로필 URL — 게시물 URL을 입력하세요 (/p/ 또는 /reel/)")
         raise ValueError("Instagram URL 파싱 실패")
+
+    # 요청 세션 없으면 서버 환경변수 사용
+    from urllib.parse import unquote as _url_unquote
+    effective_session = insta_session.strip() or os.environ.get("INSTAGRAM_SESSION_ID", "").strip()
+    if effective_session and "%" in effective_session:
+        effective_session = _url_unquote(effective_session)
+    insta_session = effective_session
 
     errors = []
     ip_blocked = False  # Railway 등 서버 IP 차단 여부
@@ -913,7 +920,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "2.1.0",
+        "version": "2.1.1",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
         "platforms": ["youtube", "tiktok", "instagram", "x"],
         "x_test": _platform_key("https://x.com/test/status/123"),
