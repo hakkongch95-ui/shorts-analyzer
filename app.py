@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.9.6")
+app = FastAPI(title="Shorts Analyzer API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,10 +72,13 @@ _YT_HEADERS = {
 
 def _platform_key(url: str) -> str:
     u = url.lower()
-    if "instagram.com" in u:                   return "instagram"
-    if "tiktok.com" in u:                      return "tiktok"
-    if "youtube.com" in u or "youtu.be" in u:  return "youtube"
-    if "x.com" in u or "twitter.com" in u:     return "x"
+    if "instagram.com" in u:                        return "instagram"
+    if "tiktok.com" in u:                           return "tiktok"
+    if "youtube.com" in u or "youtu.be" in u:       return "youtube"
+    if "x.com" in u or "twitter.com" in u:          return "x"
+    if "lipscosme.com" in u:                        return "lips"
+    if "cosme.net" in u:                            return "atcosme"
+    if "lemon8-app.com" in u:                       return "lemon8"
     return "other"
 
 def _platform_display(url: str) -> str:
@@ -84,6 +87,9 @@ def _platform_display(url: str) -> str:
         "tiktok":    "TikTok",
         "youtube":   "YouTube Shorts",
         "x":         "X (Twitter)",
+        "lips":      "LIPS",
+        "atcosme":   "AtCosmé",
+        "lemon8":    "Lemon8",
         "other":     "Unknown",
     }[_platform_key(url)]
 
@@ -322,6 +328,10 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     if "/share/" in url.lower():
         url = _resolve_instagram_share(url)
 
+    # Stories는 공개 데이터 없음
+    if "/stories/" in url.lower():
+        raise ValueError("Instagram Stories — 공개 데이터 없음 (게시물/릴스 URL만 지원)")
+
     shortcode = _extract_instagram_shortcode(url)
     if not shortcode:
         if re.match(r"https?://(?:www\.)?instagram\.com/[^/]+/?(?:\?.*)?$", url):
@@ -412,7 +422,109 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
         raise RuntimeError("비공개 게시물 — Session ID가 필요합니다")
     raise RuntimeError("Instagram 조회 실패 — Session ID를 입력하면 해결됩니다")
 
+def _fetch_lips(url: str) -> dict:
+    """LIPS (lipscosme.com) 게시물에서 likes/comments 추출."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Accept-Language": "ja-JP,ja;q=0.9",
+    }
+    # users/n/ URL은 프로필 — 게시물 URL이 아님
+    if "/users/" in url.lower() or re.search(r"lipscosme\.com/[^/]+/?(?:\?|$)", url):
+        raise ValueError("LIPS 프로필 URL — 게시물 URL을 입력하세요 (/posts/)")
+    r = _requests.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+    html = r.text
+    likes    = _parse_int(re.search(r'class="like-count">([^<]+)', html) and
+                          re.search(r'class="like-count">([^<]+)', html).group(1))
+    comments = _parse_int(re.search(r'class="comment-count">([^<]+)', html) and
+                          re.search(r'class="comment-count">([^<]+)', html).group(1))
+    clips    = _parse_int(re.search(r'class="clip-count">([^<]+)', html) and
+                          re.search(r'class="clip-count">([^<]+)', html).group(1))
+    if likes is None and comments is None:
+        raise ValueError("LIPS 데이터 파싱 실패")
+    return {"views": None, "likes": likes, "comments": comments, "shares": clips}
+
+
+def _fetch_atcosme(url: str) -> dict:
+    """AtCosmé (cosme.net) 리뷰에서 rating 추출 (helpful count는 JS 렌더링 필요)."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja-JP,ja;q=0.9",
+    }
+    r = _requests.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+    html = r.text
+    # 評価 (rating 1-7)
+    m_rating = re.search(r'class="reviewer-rating rtg-(\d+)"', html)
+    rating = int(m_rating.group(1)) if m_rating else None
+    # 役に立った count (static HTML에서 가능한 경우)
+    m_helpful = re.search(r'class="cnt act-counter"[^>]*>(\d+)', html)
+    helpful = _parse_int(m_helpful.group(1)) if m_helpful else None
+    if rating is None and helpful is None:
+        raise ValueError("AtCosmé 데이터 파싱 실패")
+    return {"views": None, "likes": helpful, "comments": None, "shares": None}
+
+
+def _extract_lemon8_id(url: str) -> Optional[str]:
+    m = re.search(r"/(\d{15,25})(?:[/?]|$)", url)
+    return m.group(1) if m else None
+
+
+def _fetch_lemon8(url: str) -> dict:
+    """Lemon8 게시물에서 likes/comments 추출."""
+    # 단축 URL 리다이렉트 처리
+    final_url = url
+    if "s.lemon8-app.com" in url:
+        r0 = _requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, allow_redirects=True)
+        final_url = r0.url
+    post_id = _extract_lemon8_id(final_url)
+    if not post_id:
+        raise ValueError("Lemon8 게시물 ID 추출 실패")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja-JP,ja;q=0.9",
+    }
+    r = _requests.get(final_url, headers=headers, timeout=15)
+    r.raise_for_status()
+    html = r.text
+    # URL 인코딩된 Remix 스크립트에서 diggCount, commentCount 추출
+    from urllib.parse import unquote as _unquote
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.DOTALL)
+    for s in scripts:
+        if post_id in s and len(s) > 10000:
+            decoded = _unquote(s)
+            likes    = _parse_int(re.search(r'"diggCount":(\d+)', decoded) and
+                                  re.search(r'"diggCount":(\d+)', decoded).group(1))
+            comments = _parse_int(re.search(r'"commentCount":(\d+)', decoded) and
+                                  re.search(r'"commentCount":(\d+)', decoded).group(1))
+            if likes is not None or comments is not None:
+                return {"views": None, "likes": likes, "comments": comments, "shares": None}
+    raise ValueError("Lemon8 데이터 파싱 실패")
+
+
+def _resolve_tiktok_url(url: str) -> str:
+    """lite.tiktok.com 등 단축/리다이렉트 URL을 실제 video URL로 변환."""
+    if "lite.tiktok.com" in url or re.search(r"tiktok\.com/t/[A-Za-z0-9]+", url):
+        r = _requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, allow_redirects=True)
+        return r.url
+    return url
+
+
 def _fetch_tiktok_tikwm(url: str) -> dict:
+    # 단축 URL 처리
+    url = _resolve_tiktok_url(url)
+    # 프로필 URL 감지 (video ID 없으면 프로필)
+    if not re.search(r"/video/\d+", url):
+        raise ValueError("TikTok 프로필 URL — 게시물 URL을 입력하세요 (/video/)")
     resp = _requests.get(
         "https://www.tikwm.com/api/",
         params={"url": url},
@@ -457,7 +569,7 @@ def _fetch_x_fxtwitter(tweet_id: str) -> dict:
 def _fetch_x(url: str) -> dict:
     tweet_id = _extract_tweet_id(url)
     if not tweet_id:
-        raise ValueError("X(Twitter) URL에서 트윗 ID를 추출할 수 없습니다")
+        raise ValueError("X 프로필 URL — 트윗 URL을 입력하세요 (/status/)")
     return _fetch_x_fxtwitter(tweet_id)
 
 def _fetch_youtube_api(video_id: str, yt_key: str) -> dict:
@@ -523,14 +635,22 @@ def _fetch_youtube_innertube(video_id: str) -> dict:
     resp.raise_for_status()
     body = resp.json()
     status = body.get("playabilityStatus", {}).get("status", "")
-    if status not in ("OK", ""):
-        raise ValueError(f"YouTube playability: {status}")
     vd = body.get("videoDetails", {})
     view_count = vd.get("viewCount")
+    # UNPLAYABLE/LOGIN_REQUIRED여도 viewCount가 있으면 반환
+    if view_count:
+        return {
+            "views":    int(view_count),
+            "likes":    None,
+            "comments": None,
+            "shares":   None,
+        }
+    if status not in ("OK", ""):
+        raise ValueError(f"YouTube playability: {status}")
     return {
-        "views":    int(view_count) if view_count else None,
-        "likes":    None,   # innertube player에서 제공 안 됨
-        "comments": None,   # innertube player에서 제공 안 됨
+        "views":    None,
+        "likes":    None,
+        "comments": None,
         "shares":   None,
     }
 
@@ -618,6 +738,21 @@ async def _fetch_one(
                     loop.run_in_executor(_executor, _fetch_x, url),
                     timeout=30,
                 )
+            elif key == "lips":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_lips, url),
+                    timeout=20,
+                )
+            elif key == "atcosme":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_atcosme, url),
+                    timeout=20,
+                )
+            elif key == "lemon8":
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_lemon8, url),
+                    timeout=30,
+                )
             else:
                 raise ValueError("지원하지 않는 플랫폼")
 
@@ -676,7 +811,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.9.6",
+        "version": "2.0.0",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
         "platforms": ["youtube", "tiktok", "instagram", "x"],
         "x_test": _platform_key("https://x.com/test/status/123"),

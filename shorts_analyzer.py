@@ -135,10 +135,17 @@ def process_excel(input_path: str, output_path: str = None,
     for col_idx in active_url_cols:
         for row in range(2, max_row + 1):
             val = ws.cell(row=row, column=col_idx).value
-            if val and str(val).strip().startswith("http"):
-                url = str(val).strip()
-                url_set.add(url)
-                url_cell_map.append((row, col_idx, url))
+            if not val:
+                continue
+            cell_text = str(val).strip()
+            # 셀에 여러 URL이 포함된 경우 분리 (줄바꿈, 쉼표, 공백 구분)
+            import re as _re
+            raw_urls = _re.split(r"[\s,、]+", cell_text)
+            for url in raw_urls:
+                url = url.strip()
+                if url.startswith("http"):
+                    url_set.add(url)
+                    url_cell_map.append((row, col_idx, url))
 
     unique_urls = list(url_set)
     print(f"분석 대상 URL: {len(unique_urls)}개 (고유), 총 셀: {len(url_cell_map)}개")
