@@ -186,6 +186,8 @@
     .p-tiktok  { background: #0d1a1a; color: #69c9d0; border: 1px solid #0d3333; }
     .p-instagram { background: #1a1020; color: #cd74e6; border: 1px solid #3d1560; }
     .p-x { background: #111519; color: #8899aa; border: 1px solid #1e2d3d; }
+    .p-lips { background: #1a1020; color: #f472b6; border: 1px solid #4d1030; }
+    .p-lemon8 { background: #1a1a10; color: #facc15; border: 1px solid #4d4410; }
     .p-other { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
 
     .status-ok  { color: var(--success); }
@@ -228,9 +230,9 @@
   <span class="logo">📊</span>
   <div>
     <h1>Shorts Analyzer</h1>
-    <p>YouTube · TikTok · Instagram · X(Twitter) 조회수 일괄 분석</p>
+    <p>YouTube · TikTok · Instagram · X(Twitter) · LIPS · AtCosmé · Lemon8 · Bluesky · Threads · Note</p>
   </div>
-  <span class="badge">v1.9.5</span>
+  <span class="badge">v2.1.0</span>
 </header>
 
 <main>
@@ -322,6 +324,12 @@ function platformBadge(p) {
   if (p.includes('tiktok'))    return `<span class="platform-badge p-tiktok">TikTok</span>`;
   if (p.includes('instagram')) return `<span class="platform-badge p-instagram">Instagram</span>`;
   if (p.includes('twitter') || p.includes('x (')) return `<span class="platform-badge p-x">X</span>`;
+  if (p.includes('lips'))     return `<span class="platform-badge p-lips">LIPS</span>`;
+  if (p.includes('atcosm'))   return `<span class="platform-badge p-other">AtCosmé</span>`;
+  if (p.includes('lemon8'))   return `<span class="platform-badge p-lemon8">Lemon8</span>`;
+  if (p.includes('bluesky'))  return `<span class="platform-badge p-other">Bluesky</span>`;
+  if (p.includes('threads'))  return `<span class="platform-badge p-other">Threads</span>`;
+  if (p.includes('note'))     return `<span class="platform-badge p-other">Note</span>`;
   return `<span class="platform-badge p-other">${p || '기타'}</span>`;
 }
 
