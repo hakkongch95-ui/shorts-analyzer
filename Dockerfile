@@ -5,6 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# v1.9.5 — X(Twitter) support + Instagram views fix
 COPY app.py .
 
 EXPOSE 8000
