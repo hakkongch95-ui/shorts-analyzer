@@ -25,7 +25,7 @@ import instaloader
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Shorts Analyzer API", version="1.9.1")
+app = FastAPI(title="Shorts Analyzer API", version="1.9.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -179,6 +179,10 @@ def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
     likes    = (media.get("edge_media_preview_like") or {}).get("count")
     comments = (media.get("edge_media_to_parent_comment") or
                 media.get("edge_media_to_comment") or {}).get("count")
+    if likes is not None and likes < 0:
+        likes = None
+    if comments is not None and comments < 0:
+        comments = None
     return {
         "views":    views,
         "likes":    likes,
@@ -186,8 +190,31 @@ def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
         "shares":   None,
     }
 
+def _parse_ig_embed_html(html: str, shortcode: str) -> dict:
+    """embed/captioned HTML에서 views/likes 추출. shortcode 일치 확인."""
+    if shortcode not in html:
+        raise ValueError("embed 응답이 다른 포스트 (캐시 오염)")
+    views: Optional[int] = None
+    likes: Optional[int] = None
+    for pat in (r'"video_view_count":\s*(\d+)',
+                r'"video_play_count":\s*(\d+)'):
+        m = re.search(pat, html)
+        if m:
+            v = int(m.group(1))
+            if v > 0:
+                views = v; break
+    m = re.search(r'"edge_media_preview_like":\s*\{\s*"count":\s*(-?\d+)', html)
+    if m:
+        v = int(m.group(1))
+        if v >= 0:
+            likes = v
+    if likes is None:
+        m = re.search(r'(\d[\d,]*)\s+likes\b', html, flags=re.IGNORECASE)
+        if m: likes = _parse_int(m.group(1))
+    return {"views": views, "likes": likes, "comments": None, "shares": None}
+
 def _fetch_instagram_embed(shortcode: str) -> dict:
-    """Instagram 공개 embed 페이지 — 레이트 리밋에 덜 민감."""
+    """Instagram 공개 embed 페이지 — 직접 호출."""
     r = _requests.get(
         f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
         headers={"User-Agent": _IG_UA, "Accept-Language": "en-US,en;q=0.9"},
@@ -195,27 +222,40 @@ def _fetch_instagram_embed(shortcode: str) -> dict:
     )
     r.raise_for_status()
     html = r.text
+    # Railway 등 rate-limited IP에서는 Instagram이 약 800KB 짜리 SPA 쉘을 반환함.
+    # 실제 embed 페이지에만 있는 'EmbedSimple' 마커로 구분.
+    if "EmbedSimple" not in html:
+        raise ValueError("embed shell (IP rate-limited)")
+    data = _parse_ig_embed_html(html, shortcode)
+    if data["views"] is None and data["likes"] is None:
+        raise ValueError("embed 파싱 실패")
+    return data
 
-    # embed HTML 내부 JSON에서 조회수/좋아요 파싱
-    likes = None
-    views = None
+_IG_PROXIES = (
+    "https://api.codetabs.com/v1/proxy/?quest={}",
+)
 
-    m = re.search(r'"video_view_count":\s*(\d+)', html)
-    if m: views = int(m.group(1))
-    if views is None:
-        m = re.search(r'"video_play_count":\s*(\d+)', html)
-        if m: views = int(m.group(1))
-
-    m = re.search(r'"edge_media_preview_like":\s*\{\s*"count":\s*(\d+)', html)
-    if m: likes = int(m.group(1))
-    if likes is None:
-        m = re.search(r'(\d[\d,]*)\s*likes', html, flags=re.IGNORECASE)
-        if m: likes = _parse_int(m.group(1))
-
-    if views is None and likes is None:
-        raise ValueError("Instagram embed 파싱 실패")
-
-    return {"views": views, "likes": likes, "comments": None, "shares": None}
+def _fetch_instagram_via_proxy(shortcode: str) -> dict:
+    """Rate-limited IP 우회용 공용 CORS 프록시 경유."""
+    target = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    last_err: Optional[str] = None
+    for tpl in _IG_PROXIES:
+        try:
+            r = _requests.get(
+                tpl.format(target),
+                headers={"User-Agent": _IG_UA, "Accept": "text/html,*/*"},
+                timeout=25,
+            )
+            if r.status_code != 200 or "EmbedSimple" not in r.text:
+                last_err = f"{tpl.split('/')[2]}: status={r.status_code} shell={('EmbedSimple' not in r.text)}"
+                continue
+            data = _parse_ig_embed_html(r.text, shortcode)
+            if data["views"] is not None or data["likes"] is not None:
+                return data
+            last_err = f"{tpl.split('/')[2]}: parse empty"
+        except Exception as e:
+            last_err = f"{tpl.split('/')[2]}: {e}"
+    raise ValueError(f"proxy 모두 실패 ({last_err})")
 
 def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     if "/share/" in url.lower():
@@ -223,43 +263,53 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
 
     shortcode = _extract_instagram_shortcode(url)
     if not shortcode:
+        if re.match(r"https?://(?:www\.)?instagram\.com/[^/]+/?(?:\?.*)?$", url):
+            raise ValueError("Instagram 프로필 URL — 게시물 URL을 입력하세요 (/p/ 또는 /reel/)")
         raise ValueError("Instagram URL 파싱 실패")
 
-    # 1차: GraphQL 직접 호출 (세션 있으면 인증, 없으면 비인증)
-    try:
-        return _fetch_instagram_graphql(shortcode, insta_session)
-    except Exception:
-        pass
+    errors = []
 
-    # 2차: Instagram embed 페이지 (세션 없이도 동작, 레이트 리밋 약함)
+    # 1차: 세션 있으면 정식 GraphQL (가장 정확)
+    if insta_session:
+        try:
+            return _fetch_instagram_graphql(shortcode, insta_session)
+        except Exception as e:
+            errors.append(f"graphql(auth):{e}")
+
+    # 2차: Instagram embed 페이지 직접 — 로컬/residential IP에서 동작
     try:
         return _fetch_instagram_embed(shortcode)
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"embed:{e}")
 
-    # 3차: instaloader
+    # 3차: 공용 프록시 경유 — Railway 같은 flagged IP 대응
     try:
-        il = _make_instaloader(insta_session) if insta_session else _instaloader
-        post = instaloader.Post.from_shortcode(il.context, shortcode)
-        return {
-            "views":    post.video_view_count if post.is_video else None,
-            "likes":    post.likes,
-            "comments": post.comments,
-            "shares":   None,
-        }
-    except Exception:
-        pass
+        return _fetch_instagram_via_proxy(shortcode)
+    except Exception as e:
+        errors.append(f"proxy:{e}")
 
-    # 4차: yt-dlp fallback (views는 None일 수 있음)
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return {
-        "views":    info.get("view_count"),
-        "likes":    info.get("like_count"),
-        "comments": info.get("comment_count"),
-        "shares":   None,
-    }
+    # 4차: 세션 없는 GraphQL (최후; 대부분 401)
+    try:
+        return _fetch_instagram_graphql(shortcode, "")
+    except Exception as e:
+        errors.append(f"graphql:{e}")
+
+    # 5차: 세션 있을 때만 instaloader 사용 (retry 60s sleep 때문에 비세션에서는 생략)
+    if insta_session:
+        try:
+            il = _make_instaloader(insta_session)
+            post = instaloader.Post.from_shortcode(il.context, shortcode)
+            return {
+                "views":    post.video_view_count if post.is_video else None,
+                "likes":    post.likes,
+                "comments": post.comments,
+                "shares":   None,
+            }
+        except Exception as e:
+            errors.append(f"instaloader:{e}")
+
+    # 모든 경로 실패 → 원인을 메시지로 합성
+    raise RuntimeError(" | ".join(errors) or "Instagram fetch failed")
 
 def _fetch_tiktok_tikwm(url: str) -> dict:
     resp = _requests.get(
@@ -422,18 +472,24 @@ async def _fetch_one(
         try:
             key = _platform_key(url)
             if key == "instagram":
-                raw = await loop.run_in_executor(
-                    _executor, _fetch_instagram, url, insta_session
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_instagram, url, insta_session),
+                    timeout=45,
                 )
             elif key == "tiktok":
-                raw = await _fetch_tiktok_async(url, loop)
+                raw = await asyncio.wait_for(_fetch_tiktok_async(url, loop), timeout=60)
             elif key == "youtube":
-                raw = await loop.run_in_executor(_executor, _fetch_youtube, url, yt_key)
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(_executor, _fetch_youtube, url, yt_key),
+                    timeout=60,
+                )
             else:
                 raise ValueError("지원하지 않는 플랫폼")
 
             base.update(raw)
             base["status"] = "Success"
+        except asyncio.TimeoutError:
+            base["status"] = "Timeout (45s)"
         except Exception as e:
             base["status"] = _classify_error(str(e), key)
 
@@ -485,6 +541,7 @@ async def analyze(req: AnalyzeRequest):
 async def health():
     return {
         "ok": True,
-        "version": "1.9.1",
+        "version": "1.9.3",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
     }
+
