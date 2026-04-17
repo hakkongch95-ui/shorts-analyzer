@@ -669,5 +669,6 @@ async def health():
         "version": "1.9.5",
         "instagram_auth": bool(os.environ.get("INSTAGRAM_SESSION_ID")),
         "platforms": ["youtube", "tiktok", "instagram", "x"],
+        "x_test": _platform_key("https://x.com/test/status/123"),
     }
 
