@@ -724,9 +724,11 @@ def _fetch_youtube_innertube(video_id: str) -> dict:
             }
         },
     }
+    # YouTube 공개 웹 플레이어 키 — YouTube 자체 웹사이트에 포함된 공개 키이며 개인 API 키가 아님.
+    # 개인 YouTube Data API v3 키가 없을 때만 fallback으로 사용됨.
+    _YT_INNERTUBE_KEY = os.environ.get("YT_INNERTUBE_KEY", "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8")
     resp = _requests.post(
-        "https://www.youtube.com/youtubei/v1/player"
-        "?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+        f"https://www.youtube.com/youtubei/v1/player?key={_YT_INNERTUBE_KEY}",
         json=payload,
         headers={
             "Content-Type": "application/json",

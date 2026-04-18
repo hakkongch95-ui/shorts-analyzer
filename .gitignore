@@ -13,10 +13,13 @@ venv/
 env/
 .env
 
-# Output / sensitive files
+# Output / sensitive files — 원본 데이터·결과 파일은 저장소에 포함하지 않음
 *_analyzed.xlsx
+*_result.xlsx
 cookies.txt
 *.cookies
+*.env
+.env.*
 
 # OS
 .DS_Store
