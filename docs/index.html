@@ -895,88 +895,92 @@ function updateSummary(){
 }
 
 // ── Export: original Excel structure with result columns inserted ─────────────
-function insertColsAoa(grid, colIdx, count){
-  // Insert 'count' blank columns at colIdx (0-based) in every row
-  for(let ri=0;ri<grid.length;ri++){
-    const blanks=new Array(count).fill('');
-    grid[ri].splice(colIdx,0,...blanks);
+// 직접 셀 조작 방식으로 삽입 — 타임스탬프·날짜 서식 등 원본 셀 타입 완전 보존
+
+function insertColsInWs(ws, colIdx, count){
+  const range=XLSX.utils.decode_range(ws['!ref']||'A1:A1');
+  // 오른쪽부터 왼쪽으로 이동 (덮어쓰기 방지)
+  for(let c=range.e.c;c>=colIdx;c--){
+    for(let r=range.s.r;r<=range.e.r;r++){
+      const src=XLSX.utils.encode_cell({r,c});
+      const dst=XLSX.utils.encode_cell({r,c:c+count});
+      if(ws[src]){ws[dst]=ws[src];delete ws[src];}
+    }
   }
+  range.e.c+=count;
+  ws['!ref']=XLSX.utils.encode_range(range);
+  // 병합 셀 조정
+  if(ws['!merges']){
+    ws['!merges']=ws['!merges'].map(m=>{
+      const nm={s:{...m.s},e:{...m.e}};
+      if(nm.s.c>=colIdx){nm.s.c+=count;nm.e.c+=count;}
+      else if(nm.e.c>=colIdx){nm.e.c+=count;}
+      return nm;
+    });
+  }
+  // 열 너비 조정
+  if(ws['!cols']){ws['!cols'].splice(colIdx,0,...Array(count).fill({wch:12}));}
 }
 
 function exportXlsx(){
   if(!S.results.length){ alert('결과가 없습니다.'); return; }
-
-  // If Excel was uploaded, reconstruct original structure with adjacent result cols
-  if(WB_DATA&&URL_COLS_INFO.length&&Object.keys(RESULT_MAP).length){
+  if(WB_ORIG_BUF&&URL_COLS_INFO.length&&Object.keys(RESULT_MAP).length){
     exportXlsxOriginal(); return;
   }
   exportXlsxSimple();
 }
 
 function exportXlsxOriginal(){
-  if(!WB_DATA||!URL_COLS_INFO.length){ exportXlsxSimple(); return; }
+  if(!WB_ORIG_BUF||!URL_COLS_INFO.length){ exportXlsxSimple(); return; }
 
-  // Deep-copy original data (array of arrays)
-  const grid=WB_DATA.map(row=>Array.isArray(row)?[...row]:[]);
-  const METRIC_HDRS=['Views','Likes','Comments','Shares','Status'];
+  // 원본 워크북 재파싱 — 타임스탬프·날짜 서식 보존
+  const wb=XLSX.read(WB_ORIG_BUF,{type:'array'});
+  const ws=wb.Sheets[wb.SheetNames[0]];
 
-  // Process RIGHT to LEFT so earlier column indices stay valid
+  const METRIC_HDRS=['Views','Likes','Comments','Shares'];
+  const n=METRIC_HDRS.length;
+
+  // 오른쪽 열부터 처리 — 왼쪽 열의 원래 인덱스가 유지됨
   const sortedCols=[...URL_COLS_INFO].sort((a,b)=>b.col-a.col);
 
   for(const colInfo of sortedCols){
-    const insertAt=colInfo.col+1;  // insert AFTER the URL column
-    const n=METRIC_HDRS.length;
+    const insertAt=colInfo.col+1;  // URL 열 바로 뒤에 삽입 (0-based)
 
-    // Insert blank columns in all rows
-    insertColsAoa(grid, insertAt, n);
+    // 삽입 위치 이후 셀들을 오른쪽으로 이동
+    insertColsInWs(ws,insertAt,n);
 
-    // Write header row (row 0)
+    // 헤더 행 (r=0 = 첫 번째 행)
     METRIC_HDRS.forEach((h,i)=>{
-      grid[0][insertAt+i]=colInfo.prefix+h;
+      const ref=XLSX.utils.encode_cell({r:0,c:insertAt+i});
+      ws[ref]={t:'s',v:colInfo.prefix+h};
     });
 
-    // Write data rows
-    for(let ri=1;ri<grid.length;ri++){
-      const rawVal=grid[ri][colInfo.col];  // original URL col (unshifted)
-      const url=rawVal?extractFirstUrl(String(rawVal)):null;
-      if(!url) continue;
-      const result=RESULT_MAP[url];
+    // 데이터 행: WB_DATA(원본)에서 URL 조회 → RESULT_MAP에서 결과 조회
+    const cells=extractExcelUrlsFromCol(WB_DATA,colInfo.col);
+    for(const cell of cells){
+      const result=RESULT_MAP[cell.url];
       if(!result) continue;
-      const isOk=result.status==='Success';
-      const vals=[
-        isOk?(result.views??''):(result.views??''),
-        result.likes??'',
-        result.comments??'',
-        result.shares??'',
-        result.status||'',
-      ];
-      vals.forEach((v,i)=>{ grid[ri][insertAt+i]=v===null?'':v; });
+      const vals=[result.views??null,result.likes??null,result.comments??null,result.shares??null];
+      vals.forEach((v,i)=>{
+        if(v===null) return;  // 실패/N/A는 빈 셀
+        const ref=XLSX.utils.encode_cell({r:cell.row,c:insertAt+i});
+        ws[ref]={t:'n',v:v};
+      });
     }
   }
 
-  // Build workbook from modified grid
-  const ws=XLSX.utils.aoa_to_sheet(grid);
-  // Set column widths
-  const maxCol=grid.reduce((m,r)=>Math.max(m,r.length),0);
-  ws['!cols']=Array.from({length:maxCol},(_,i)=>{
-    // Result columns (inserted) get width 14; others keep default
-    return {wch:14};
-  });
-
-  const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,ws,'결과');
   XLSX.writeFile(wb,'shorts_analyzer_result.xlsx');
 }
 
 function exportXlsxSimple(){
   if(!S.results.length){ alert('결과가 없습니다.'); return; }
-  const hdr=['#','Platform','URL','Views','Likes','Comments','Shares','Status'];
+  const hdr=['#','Platform','URL','Views','Likes','Comments','Shares'];
   const rows=S.results.map(r=>[
     r.idx, r.platform||detectPlatform(r.url), r.url,
-    r.views??'', r.likes??'', r.comments??'', r.shares??'', r.status
+    r.views??'', r.likes??'', r.comments??'', r.shares??''
   ]);
   const ws=XLSX.utils.aoa_to_sheet([hdr,...rows]);
-  ws['!cols']=[{wch:5},{wch:18},{wch:55},{wch:13},{wch:13},{wch:13},{wch:13},{wch:28}];
+  ws['!cols']=[{wch:5},{wch:18},{wch:55},{wch:13},{wch:13},{wch:13},{wch:13}];
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb,ws,'Results');
   XLSX.writeFile(wb,'shorts_analyzer_results_simple.xlsx');

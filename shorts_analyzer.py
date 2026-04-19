@@ -31,8 +31,8 @@ except ImportError:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 DEFAULT_API    = "https://shorts-analyzer-api-production.up.railway.app"
-METRIC_HEADERS = ["Views", "Likes", "Comments", "Shares", "Status"]
-METRIC_WIDTHS  = [12, 10, 10, 10, 24]
+METRIC_HEADERS = ["Views", "Likes", "Comments", "Shares"]
+METRIC_WIDTHS  = [12, 10, 10, 10]
 
 HEADER_FILL  = PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid")
 HEADER_FONT  = Font(bold=True, color="FFFFFF", size=10)
@@ -256,11 +256,10 @@ def process_excel(input_path: str, output_path: str = None,
                 sanitize(result.get("likes")),
                 sanitize(result.get("comments")),
                 sanitize(result.get("shares")),
-                result.get("status", "Error"),
             ]
             for i, v in enumerate(vals):
                 c = ws_w.cell(row=row, column=insert_at + i)
-                c.value     = v
+                c.value     = v   # 실패 시 None (빈 셀), 성공 시 숫자
                 c.fill      = fill
                 c.alignment = CENTER
 
