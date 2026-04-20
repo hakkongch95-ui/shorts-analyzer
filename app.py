@@ -169,54 +169,153 @@ def _resolve_instagram_share(url: str) -> str:
     except Exception:
         return url
 
-def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
-    """Instagram GraphQL 직접 호출 — instaloader 의존성 없이 view count 포함."""
-    cookies = {}
-    if session_id:
-        cookies["sessionid"] = session_id
+def _shortcode_to_media_id(shortcode: str) -> int:
+    """Instagram shortcode → numeric media ID."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    n = 0
+    for ch in shortcode:
+        n = n * 64 + alphabet.index(ch)
+    return n
 
+
+def _fetch_instagram_media_api(shortcode: str, session_id: str) -> dict:
+    """Instagram /api/v1/media/{id}/info/ — 모바일 API, 세션 필수. play_count 포함."""
+    media_id = _shortcode_to_media_id(shortcode)
     r = _requests.get(
-        "https://www.instagram.com/graphql/query",
-        params={
-            "variables": json.dumps({"shortcode": shortcode}),
-            "doc_id": "8845758582119845",
+        f"https://www.instagram.com/api/v1/media/{media_id}/info/",
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                "Instagram/300.0.0.29.111"
+            ),
+            "x-ig-app-id": "936619743392459",
+            "Accept-Language": "en-US,en;q=0.9",
         },
+        cookies={"sessionid": session_id},
+        timeout=15,
+    )
+    r.raise_for_status()
+    items = r.json().get("items", [])
+    if not items:
+        raise ValueError("media/info: items empty")
+    m = items[0]
+    views    = m.get("play_count") or m.get("view_count")
+    likes    = m.get("like_count")
+    comments = m.get("comment_count")
+    return {"views": views, "likes": likes, "comments": comments, "shares": None}
+
+
+def _fetch_instagram_a1(shortcode: str, session_id: str = "") -> dict:
+    """Instagram /?__a=1 JSON API — 세션 있으면 완전한 통계, 없으면 기본 통계."""
+    cookies = {"sessionid": session_id} if session_id else {}
+    r = _requests.get(
+        f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis",
         headers={
             "User-Agent": _IG_UA,
             "x-ig-app-id": "936619743392459",
+            "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": f"https://www.instagram.com/p/{shortcode}/",
         },
         cookies=cookies,
         timeout=15,
+        allow_redirects=True,
     )
+    if r.status_code == 404:
+        raise ValueError("Not Found (404)")
+    if r.status_code in (401, 403) or "accounts/login" in r.url:
+        raise ValueError("Login Required")
     r.raise_for_status()
-    body = r.json()
+    try:
+        data = r.json()
+    except Exception:
+        raise ValueError("__a=1 JSON 파싱 실패")
 
     media = (
-        body.get("data", {}).get("xdt_shortcode_media")
-        or body.get("data", {}).get("shortcode_media")
+        data.get("graphql", {}).get("shortcode_media")
+        or (data.get("items") or [{}])[0]
+        or {}
     )
     if not media:
-        raise ValueError("Instagram 응답에서 미디어 정보 없음")
+        raise ValueError("__a=1 미디어 없음")
 
-    # video_play_count = Instagram 표시 재생수, video_view_count = 3초 이상 조회수
-    views    = media.get("video_play_count") or media.get("video_view_count")
-    likes    = (media.get("edge_media_preview_like") or {}).get("count")
-    comments = (media.get("edge_media_to_parent_comment") or
-                media.get("edge_media_to_comment") or {}).get("count")
-    if likes is not None and likes < 0:
-        likes = None
-    if comments is not None and comments < 0:
-        comments = None
-    is_video = media.get("is_video", False)
-    return {
-        "views":    views,
-        "likes":    likes,
-        "comments": comments,
-        "shares":   None,
-        "is_video": is_video,
-    }
+    views = (
+        media.get("video_view_count")
+        or media.get("video_play_count")
+        or media.get("play_count")
+    )
+    likes = (media.get("edge_media_preview_like") or {}).get("count")
+    if likes is None:
+        likes = media.get("like_count")
+    comments = (
+        media.get("edge_media_to_parent_comment")
+        or media.get("edge_media_to_comment")
+        or {}
+    ).get("count")
+    if comments is None:
+        comments = media.get("comment_count")
+    return {"views": views, "likes": likes, "comments": comments, "shares": None}
+
+
+def _fetch_instagram_graphql(shortcode: str, session_id: str = "") -> dict:
+    """Instagram GraphQL 직접 호출 — 복수 doc_id 시도."""
+    cookies = {"sessionid": session_id} if session_id else {}
+    _doc_ids = ["8845758582119845", "10015901848340889"]
+
+    last_err = ""
+    for doc_id in _doc_ids:
+        try:
+            r = _requests.get(
+                "https://www.instagram.com/graphql/query",
+                params={
+                    "variables": json.dumps({"shortcode": shortcode}),
+                    "doc_id": doc_id,
+                },
+                headers={
+                    "User-Agent": _IG_UA,
+                    "x-ig-app-id": "936619743392459",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Referer": f"https://www.instagram.com/p/{shortcode}/",
+                },
+                cookies=cookies,
+                timeout=15,
+            )
+            r.raise_for_status()
+            body = r.json()
+            media = (
+                body.get("data", {}).get("xdt_shortcode_media")
+                or body.get("data", {}).get("shortcode_media")
+            )
+            if not media:
+                last_err = f"doc_id={doc_id}: 미디어 없음"
+                continue
+
+            views = (
+                media.get("video_play_count")
+                or media.get("video_view_count")
+                or media.get("play_count")
+            )
+            likes    = (media.get("edge_media_preview_like") or {}).get("count")
+            comments = (
+                media.get("edge_media_to_parent_comment")
+                or media.get("edge_media_to_comment")
+                or {}
+            ).get("count")
+            if likes is not None and likes < 0:
+                likes = None
+            if comments is not None and comments < 0:
+                comments = None
+            return {
+                "views":    views,
+                "likes":    likes,
+                "comments": comments,
+                "shares":   None,
+                "is_video": media.get("is_video", False),
+            }
+        except Exception as e:
+            last_err = f"doc_id={doc_id}: {e}"
+    raise ValueError(f"GraphQL 모두 실패 — {last_err}")
 
 def _parse_ig_embed_html(html: str, shortcode: str) -> dict:
     """embed/captioned HTML에서 views/likes 추출. shortcode 일치 확인."""
@@ -353,42 +452,69 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
     insta_session = effective_session
 
     errors = []
-    ip_blocked = False  # Railway 등 서버 IP 차단 여부
+    ip_blocked = False
 
     import time as _time
 
-    # 1차: 세션 있으면 정식 GraphQL — 최대 3회 재시도 + backoff
+    # 1차: 세션 있으면 모바일 API (play_count 포함, 가장 신뢰도 높음)
+    if insta_session:
+        try:
+            result = _fetch_instagram_media_api(shortcode, insta_session)
+            if result.get("views") is not None or result.get("likes") is not None:
+                return result
+            errors.append("media_api(auth):data empty")
+        except Exception as e:
+            errors.append(f"media_api(auth):{e}")
+
+    # 2차: 세션 있으면 __a=1 JSON API
+    if insta_session:
+        try:
+            result = _fetch_instagram_a1(shortcode, insta_session)
+            if result.get("views") is not None or result.get("likes") is not None:
+                return result
+            errors.append("a1(auth):data empty")
+        except Exception as e:
+            errors.append(f"a1(auth):{e}")
+
+    # 3차: 세션 있으면 GraphQL — 최대 3회 재시도 + backoff
     if insta_session:
         for attempt in range(3):
             try:
                 result = _fetch_instagram_graphql(shortcode, insta_session)
                 if result.get("views") is not None or result.get("likes") is not None:
                     return result
-                # 데이터 비어있으면 짧게 대기 후 재시도
                 errors.append(f"graphql(auth:{attempt+1}):data empty")
                 _time.sleep(1.5)
             except Exception as e:
                 err_str = str(e)
                 errors.append(f"graphql(auth:{attempt+1}):{err_str}")
-                # 429 rate limit → 더 오래 대기
                 wait = 4.0 if "429" in err_str or "too many" in err_str.lower() else 2.0
                 if attempt < 2:
                     _time.sleep(wait * (attempt + 1))
 
-    # 2차: GraphQL 비인증
+    # 4차: __a=1 비인증
+    try:
+        result = _fetch_instagram_a1(shortcode, "")
+        if result.get("views") is not None or result.get("likes") is not None:
+            return result
+        errors.append("a1(noauth):data empty")
+    except Exception as e:
+        errors.append(f"a1(noauth):{e}")
+
+    # 5차: GraphQL 비인증
     for attempt in range(2):
         try:
             result = _fetch_instagram_graphql(shortcode, "")
             if result.get("views") is not None or result.get("likes") is not None:
                 return result
-            errors.append(f"graphql({attempt+1}):data empty")
+            errors.append(f"graphql(noauth:{attempt+1}):data empty")
             break
         except Exception as e:
-            errors.append(f"graphql({attempt+1}):{e}")
+            errors.append(f"graphql(noauth:{attempt+1}):{e}")
             if attempt < 1:
                 _time.sleep(1.5)
 
-    # 3차: Instagram embed 페이지
+    # 6차: embed 페이지
     embed_result = None
     try:
         embed_result = _fetch_instagram_embed(shortcode)
@@ -398,8 +524,8 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
             ip_blocked = True
         errors.append(f"embed:{err_str}")
 
-    # embed + GraphQL 결과 병합 (GraphQL views + embed likes)
     if embed_result is not None:
+        # embed + GraphQL views 병합 시도
         gql_views = None
         for attempt in range(2):
             try:
@@ -414,19 +540,19 @@ def _fetch_instagram(url: str, insta_session: str = "") -> dict:
             embed_result["views"] = gql_views
         return embed_result
 
-    # 4차: 공용 프록시 경유
+    # 7차: 공용 프록시
     try:
         return _fetch_instagram_via_proxy(shortcode)
     except Exception as e:
         errors.append(f"proxy:{e}")
 
-    # 5차: yt-dlp (세션 있으면 쿠키 전달)
+    # 8차: yt-dlp
     try:
         return _fetch_instagram_ytdlp(url, insta_session)
     except Exception as e:
         errors.append(f"ytdlp:{e}")
 
-    # 6차: 세션 있을 때만 instaloader 사용
+    # 9차: instaloader (세션 있을 때만)
     if insta_session:
         try:
             il = _make_instaloader(insta_session)

@@ -969,6 +969,21 @@ function exportXlsxOriginal(){
     }
   }
 
+  // Fix Google Forms timestamp cells: numFmtId=0 (General) stores date serials as plain numbers
+  const wsRange=XLSX.utils.decode_range(ws['!ref']);
+  for(let r=wsRange.s.r;r<=wsRange.e.r;r++){
+    for(let c=wsRange.s.c;c<=wsRange.e.c;c++){
+      const ref=XLSX.utils.encode_cell({r,c});
+      const cell=ws[ref];
+      if(!cell||cell.t!=='n') continue;
+      const v=cell.v;
+      // Non-integer in Excel date range 2000–2100 with no format = timestamp
+      if(v>36526&&v<73050&&v!==Math.floor(v)&&!cell.z){
+        cell.z='yyyy/mm/dd hh:mm:ss';
+      }
+    }
+  }
+
   XLSX.writeFile(wb,'shorts_analyzer_result.xlsx');
 }
 
